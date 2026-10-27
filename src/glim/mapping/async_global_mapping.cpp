@@ -67,6 +67,11 @@ void AsyncGlobalMapping::save(const std::string& path) {
   logger->info("saved");
 }
 
+bool AsyncGlobalMapping::replay_submaps() {
+  std::lock_guard<std::mutex> lock(global_mapping_mutex);
+  return global_mapping->replay_submaps();
+}
+
 gtsam_points::PointCloud::Ptr AsyncGlobalMapping::export_points() {
   std::lock_guard<std::mutex> lock(global_mapping_mutex);
   logger->info("exporting points");

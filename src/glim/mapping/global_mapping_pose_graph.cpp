@@ -4,7 +4,10 @@
 #include <boost/filesystem.hpp>
 
 #include <gtsam/inference/Symbol.h>
+#include <gtsam/base/serialization.h>
 #include <gtsam/geometry/Pose3.h>
+#include <gtsam/nonlinear/NonlinearFactorGraph.h>
+#include <gtsam/nonlinear/Values.h>
 #include <gtsam/slam/BetweenFactor.h>
 
 #include <gtsam_points/ann/kdtree.hpp>
@@ -244,12 +247,102 @@ void GlobalMappingPoseGraph::save(const std::string& path) {
   }
 }
 
+bool GlobalMappingPoseGraph::load(const std::string& path) {
+  if (!submaps.empty()) {
+    logger->error("GlobalMappingPoseGraph can only load into an empty mapping instance");
+    return false;
+  }
+
+  std::ifstream ifs(path + "/graph.txt");
+  if (!ifs) {
+    logger->error("failed to open {}/graph.txt", path);
+    return false;
+  }
+
+  std::string token;
+  int num_submaps = 0;
+  int num_all_frames = 0;
+  int num_matching_cost_factors = 0;
+  if (!(ifs >> token >> num_submaps) || token != "num_submaps:" || num_submaps <= 0 ||
+      !(ifs >> token >> num_all_frames) || token != "num_all_frames:" ||
+      !(ifs >> token >> num_matching_cost_factors) || token != "num_matching_cost_factors:") {
+    logger->error("invalid pose-graph dump header in {}", path);
+    return false;
+  }
+  if (num_matching_cost_factors != 0) {
+    logger->error("{} is not a GlobalMappingPoseGraph dump", path);
+    return false;
+  }
+
+  gtsam::NonlinearFactorGraph graph;
+  gtsam::Values values;
+  try {
+    gtsam::deserializeFromBinaryFile(path + "/graph.bin", graph);
+    gtsam::deserializeFromBinaryFile(path + "/values.bin", values);
+  } catch (const std::exception& e) {
+    logger->error("failed to deserialize pose graph from {}: {}", path, e.what());
+    return false;
+  }
+
+  for (int i = 0; i < num_submaps; ++i) {
+    if (!values.exists(X(i))) {
+      logger->error("pose graph dump {} is missing X{}", path, i);
+      return false;
+    }
+
+    auto submap = SubMap::load((boost::format("%s/%06d") % path % i).str());
+    if (!submap) {
+      logger->error("failed to load submap {} from {}", i, path);
+      return false;
+    }
+
+    // A resumed local mapper starts numbering at zero again.  Global graph
+    // keys and loop factors must instead remain unique across both sessions.
+    submap->id = i;
+    // Mark restored data for the viewer; live submaps keep their default ID.
+    submap->session_id = -1;
+    submap->T_world_origin = Eigen::Isometry3d(values.at<gtsam::Pose3>(X(i)).matrix());
+    insert_submap(i, submap);
+  }
+
+  try {
+    Callbacks::on_smoother_update(*isam2, graph, values);
+    const auto result = isam2->update(graph, values);
+    Callbacks::on_smoother_update_result(*isam2, result);
+  } catch (const std::exception& e) {
+    logger->error("failed to initialize pose graph from {}: {}", path, e.what());
+    return false;
+  }
+
+  update_submaps();
+  Callbacks::on_update_submaps(submaps);
+  logger->info("loaded {} submaps from {}", submaps.size(), path);
+  return true;
+}
+
+bool GlobalMappingPoseGraph::replay_submaps() {
+  if (submaps.empty()) {
+    return false;
+  }
+
+  for (const auto& submap : submaps) {
+    Callbacks::on_insert_submap(submap);
+  }
+  Callbacks::on_update_submaps(submaps);
+  return true;
+}
+
 gtsam_points::PointCloud::Ptr GlobalMappingPoseGraph::export_points() {
   return std::make_shared<gtsam_points::PointCloudCPU>();
 }
 
 void GlobalMappingPoseGraph::insert_submap(int current, const SubMap::Ptr& submap) {
   logger->debug("insert_submap id={}", submap->id);
+
+  // Submap IDs are used by loop factors as GTSAM key indices.  Keep them
+  // identical to the append position so a resumed session cannot collide
+  // with IDs produced by its new local mapper.
+  submap->id = current;
 
   submap->voxelmaps.clear();
 

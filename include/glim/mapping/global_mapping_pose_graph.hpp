@@ -98,6 +98,8 @@ public:
   virtual void optimize() override;
 
   virtual void save(const std::string& path) override;
+  virtual bool load(const std::string& path) override;
+  virtual bool replay_submaps() override;
   virtual gtsam_points::PointCloud::Ptr export_points() override;
 
 private:

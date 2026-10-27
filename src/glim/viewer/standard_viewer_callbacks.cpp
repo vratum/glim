@@ -520,6 +520,12 @@ void StandardViewer::set_callbacks() {
           break;
       }
 
+      // Restored submaps are quiet visual context; live mapping retains the
+      // user's normal colour mode.
+      if (submap->session_id < 0) {
+        shader_setting.set_color_mode(guik::ColorMode::FLAT_COLOR).set_color(Eigen::Vector4f(0.45f, 0.45f, 0.45f, 1.0f));
+      }
+
       shader_setting.set_alpha(points_alpha);
 
       if (enable_partial_rendering) {

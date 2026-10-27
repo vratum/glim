@@ -75,7 +75,7 @@ public:
    * @brief Load a mapping result from a dumped directory
    * @param path Input dump path
    */
-  bool load(const std::string& path);
+  bool load(const std::string& path) override;
 
 private:
   void insert_submap(int current, const SubMap::Ptr& submap);

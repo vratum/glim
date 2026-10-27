@@ -69,6 +69,23 @@ public:
   virtual void save(const std::string& path) {}
 
   /**
+   * @brief Load a mapping result from a dumped directory.
+   *
+   * This must be called before the mapping instance starts accepting live
+   * submaps.  Implementations that do not support resuming return false.
+   *
+   * @param path Input dump path
+   * @return True when the dump was loaded successfully
+   */
+  virtual bool load(const std::string& path) { return false; }
+
+  /**
+   * @brief Re-publish loaded submaps after viewer extensions subscribe.
+   * @return True when the implementation supports callback replay.
+   */
+  virtual bool replay_submaps() { return false; }
+
+  /**
    * @brief Export all the submap points
    */
   virtual gtsam_points::PointCloud::Ptr export_points() { return nullptr; }

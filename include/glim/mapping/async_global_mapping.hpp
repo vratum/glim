@@ -72,6 +72,9 @@ public:
    */
   void save(const std::string& path);
 
+  /// Replay restored submaps after viewer extensions have subscribed.
+  bool replay_submaps();
+
   gtsam_points::PointCloud::Ptr export_points();
 
   std::shared_ptr<glim::GlobalMappingBase> get_global_mapping() {

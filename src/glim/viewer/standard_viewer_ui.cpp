@@ -15,6 +15,7 @@
 #include <glk/pointcloud_buffer.hpp>
 #include <glk/primitives/primitives.hpp>
 #include <guik/spdlog_sink.hpp>
+#include <guik/camera/basic_projection_control.hpp>
 #include <guik/viewer/light_viewer.hpp>
 
 #include <glim/viewer/standard_viewer_mem.hpp>
@@ -134,25 +135,32 @@ void StandardViewer::drawable_selection() {
   std::vector<const char*> camera_modes = {"STANDARD", "FPS", "TPS", "TOPDOWN"};
   ImGui::SetNextItemWidth(92);
   if (ImGui::Combo("camera_mode", &camera_mode, camera_modes.data(), camera_modes.size())) {
+    const auto set_perspective_projection = [viewer](const float fovy, const float near, const float far) {
+      auto projection = std::make_shared<guik::BasicProjectionControl>(viewer->canvas_size());
+      projection->set_projection_mode(0);
+      projection->set_fovy(fovy);
+      projection->set_depth_range(Eigen::Vector2f(near, far));
+      viewer->set_projection_control(projection);
+    };
     switch (camera_mode) {
       default:
       case 0:
         viewer->use_orbit_camera_control();
-        viewer->use_perspective_projection_control(30.0f, 1.0, 1000.0f);
+        set_perspective_projection(30.0f, 1.0f, 1000.0f);
         break;
       case 1:
         viewer->use_sensor_view_camera_control(Eigen::Translation3f(-0.05f, 0.0f, 0.0f) * Eigen::Isometry3f::Identity(), 1e-3, 1e-3);
-        viewer->use_perspective_projection_control(90.0f, 0.1f, 500.0f);
+        set_perspective_projection(90.0f, 0.1f, 500.0f);
         viewer->disable_xy_grid();
         break;
       case 2:
         viewer->use_sensor_view_camera_control();
-        viewer->use_perspective_projection_control(45.0f, 0.1f, 500.0f);
+        set_perspective_projection(45.0f, 0.1f, 500.0f);
         viewer->disable_xy_grid();
         break;
       case 3:
         viewer->use_topdown_camera_control();
-        viewer->use_perspective_projection_control(30.0f, 1.0, 1000.0f);
+        set_perspective_projection(30.0f, 1.0f, 1000.0f);
         break;
     }
   }
