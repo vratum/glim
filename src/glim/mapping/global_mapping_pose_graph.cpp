@@ -25,6 +25,7 @@
 #include <glim/util/serialization.hpp>
 #include <glim/mapping/callbacks.hpp>
 
+
 #ifdef GTSAM_USE_TBB
 #include <tbb/task_arena.h>
 #endif
@@ -425,6 +426,7 @@ void GlobalMappingPoseGraph::find_loop_candidates(int current) {
     new_candidates.emplace_back(LoopCandidate{submap_targets[i], submap_targets[current], T_target_source});
   }
 
+
   loop_candidates.insert(new_candidates);
 }
 
@@ -572,3 +574,4 @@ void GlobalMappingPoseGraph::update_submaps() {
 }
 
 }  // namespace glim
+

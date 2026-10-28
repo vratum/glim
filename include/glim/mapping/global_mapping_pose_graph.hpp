@@ -133,5 +133,6 @@ private:
   std::unique_ptr<gtsam_points::ISAM2Ext> isam2;
 
   std::shared_ptr<void> tbb_task_arena;
+
 };
 }  // namespace glim
