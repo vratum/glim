@@ -24,7 +24,8 @@
 
 namespace glim {
 
-LooseInitialStateEstimation::LooseInitialStateEstimation(const Eigen::Isometry3d& T_lidar_imu, const Eigen::Matrix<double, 6, 1>& imu_bias) : T_lidar_imu(T_lidar_imu) {
+LooseInitialStateEstimation::LooseInitialStateEstimation(const Eigen::Isometry3d& T_lidar_imu, const Eigen::Matrix<double, 6, 1>& imu_bias)
+: T_lidar_imu(T_lidar_imu), initial_imu_bias(imu_bias) {
   glim::Config config(glim::GlobalConfig::get_config_path("config_odometry"));
   num_threads = config.param("odometry_estimation", "num_threads", 2);
   window_size = config.param("odometry_estimation", "initialization_window_size", 1.0);
@@ -114,7 +115,7 @@ EstimationFrame::ConstPtr LooseInitialStateEstimation::initial_pose() {
     graph.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(i - 1), X(i), gtsam::Pose3(T_imu0_imu1.matrix()), gtsam::noiseModel::Isotropic::Precision(6, 1e3));
 
     int num_integrated;
-    gtsam::imuBias::ConstantBias imu_bias;
+    const gtsam::imuBias::ConstantBias imu_bias(initial_imu_bias);
     imu_integration->integrate_imu(t0, t1, imu_bias, &num_integrated);
 
     graph.emplace_shared<gtsam::ImuFactor>(X(i - 1), V(i - 1), X(i), V(i), B(i - 1), imu_integration->integrated_measurements());
@@ -169,9 +170,9 @@ EstimationFrame::ConstPtr LooseInitialStateEstimation::initial_pose() {
     const Eigen::Isometry3d T_world_imu = init_T_world_odom * T_odom_lidar[i].second * T_lidar_imu;
     values.insert(X(i), gtsam::Pose3(T_world_imu.matrix()));
     values.insert(V(i), gtsam::Vector3(0.0, 0.0, 0.0));
-    values.insert(B(i), gtsam::imuBias::ConstantBias());
+    values.insert(B(i), gtsam::imuBias::ConstantBias(initial_imu_bias));
 
-    graph.emplace_shared<gtsam::PriorFactor<gtsam::imuBias::ConstantBias>>(B(i), gtsam::imuBias::ConstantBias(), gtsam::noiseModel::Isotropic::Precision(6, 10.0));
+    graph.emplace_shared<gtsam::PriorFactor<gtsam::imuBias::ConstantBias>>(B(i), gtsam::imuBias::ConstantBias(initial_imu_bias), gtsam::noiseModel::Isotropic::Precision(6, 10.0));
   }
 
   gtsam::LevenbergMarquardtParams lm_params;

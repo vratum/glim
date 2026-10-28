@@ -26,6 +26,7 @@ public:
 
 private:
   const Eigen::Isometry3d T_lidar_imu;
+  const Eigen::Matrix<double, 6, 1> initial_imu_bias;
 
   int num_threads;
   double window_size;
