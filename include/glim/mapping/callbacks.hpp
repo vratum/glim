@@ -3,6 +3,7 @@
 #include <glim/util/callback_slot.hpp>
 #include <glim/odometry/estimation_frame.hpp>
 #include <glim/mapping/sub_map.hpp>
+#include <glim/mapping/session_alignment.hpp>
 
 #ifdef GLIM_USE_OPENCV
 namespace cv {
@@ -84,6 +85,12 @@ struct SubMappingCallbacks {
  *
  */
 struct GlobalMappingCallbacks {
+  // Runs on the global mapping thread. Pending submaps are still in the new
+  // session frame and have not entered the reference graph.
+  static CallbackSlot<void(const std::vector<SubMap::Ptr>&, const std::vector<SubMap::Ptr>&, SessionAlignment&)> on_align_session;
+  // Sensor constraints for an unlocalized independent save. Loop detectors and
+  // reference-graph observers must not be replayed into this separate graph.
+  static CallbackSlot<void(const SubMap::ConstPtr&, gtsam::NonlinearFactorGraph&, gtsam::Values&)> on_independent_session_submap;
 #ifdef GLIM_USE_OPENCV
   /**
    * @brief Image input callback

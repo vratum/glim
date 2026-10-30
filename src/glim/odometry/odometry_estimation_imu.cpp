@@ -173,6 +173,11 @@ EstimationFrame::ConstPtr OdometryEstimationIMU::insert_frame(const Preprocessed
     }
     init_estimation.reset();
 
+    // ROBUST/LOOSE may estimate a calibration different from the config seed
+    // (or from its zero default). Keep subsequent bias priors at the actual
+    // initialized calibration rather than pulling a valid estimate to zero.
+    params->imu_bias = init_state->imu_bias;
+
     logger->info("initial IMU state estimation result");
     logger->info("T_world_imu={}", convert_to_string(init_state->T_world_imu));
     logger->info("v_world_imu={}", convert_to_string(init_state->v_world_imu));

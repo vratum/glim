@@ -103,7 +103,11 @@ PreprocessedFrame::Ptr CloudPreprocessor::preprocess_impl(const RawPoints::Const
   // Downsampling
   if (params.use_random_grid_downsampling) {
     const double rate = params.downsample_target > 0 ? static_cast<double>(params.downsample_target) / frame->size() : params.downsample_rate;
-    frame = gtsam_points::randomgrid_sampling(frame, params.downsample_resolution, rate, mt, params.num_threads);
+    // gtsam_points 1.2.x assigns RNG streams to workers and appends sampled
+    // blocks in completion order. Scheduling then changes the actual point
+    // set, even with a fixed seed. Serialize only sampling; neighbor search
+    // and registration still use the configured parallelism.
+    frame = gtsam_points::randomgrid_sampling(frame, params.downsample_resolution, rate, mt, 1);
   } else {
     frame = gtsam_points::voxelgrid_sampling(frame, params.downsample_resolution, params.num_threads);
   }

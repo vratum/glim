@@ -1,6 +1,8 @@
 #include <glim/odometry/odometry_estimation_cpu.hpp>
 
 #include <spdlog/spdlog.h>
+#include <cmath>
+#include <stdexcept>
 
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/slam/BetweenFactor.h>
@@ -41,6 +43,12 @@ OdometryEstimationCPUParams::OdometryEstimationCPUParams() : OdometryEstimationI
   max_iterations = config.param<int>("odometry_estimation", "max_iterations", 5);
   lru_thresh = config.param<int>("odometry_estimation", "lru_thresh", 100);
   target_downsampling_rate = config.param<double>("odometry_estimation", "target_downsampling_rate", 0.1);
+  registration_rotation_sigma_rad = config.param<double>("odometry_estimation", "registration_rotation_sigma_rad", 0.001);
+  registration_translation_sigma_m = config.param<double>("odometry_estimation", "registration_translation_sigma_m", 0.0316227766);
+  if (!std::isfinite(registration_rotation_sigma_rad) || registration_rotation_sigma_rad <= 0.0 ||
+      !std::isfinite(registration_translation_sigma_m) || registration_translation_sigma_m <= 0.0) {
+    throw std::invalid_argument("CPU registration sigmas must be finite and positive (rotation in rad, translation in m)");
+  }
 
   ivox_resolution = config.param<double>("odometry_estimation", "ivox_resolution", 0.5);
   ivox_min_dist = config.param<double>("odometry_estimation", "ivox_min_dist", 0.1);
@@ -162,9 +170,17 @@ gtsam::NonlinearFactorGraph OdometryEstimationCPU::create_factors(const int curr
   //   factors.emplace_shared<gtsam::LinearContainerFactor>(linearized->at(i), values);
   // }
 
-  // TODO: Extract a relative pose covariance from a frame-to-model matching result?
-  factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(last), X(current), gtsam::Pose3(T_last_current.matrix()), gtsam::noiseModel::Isotropic::Precision(6, 1e3));
-  factors.emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(X(current), gtsam::Pose3(T_target_imu.matrix()), gtsam::noiseModel::Isotropic::Precision(6, 1e3));
+  // These diagonal sigmas are empirical fusion weights, not a covariance
+  // inferred from the registration Hessian. GTSAM Pose3 orders rotation [rad]
+  // before translation [m]; an isotropic 6D precision mixes those units.
+  // TODO: Account for geometry-dependent uncertainty and target correlations.
+  gtsam::Vector6 registration_sigmas;
+  registration_sigmas.head<3>().setConstant(params->registration_rotation_sigma_rad);
+  registration_sigmas.tail<3>().setConstant(params->registration_translation_sigma_m);
+  factors.emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(X(last), X(current), gtsam::Pose3(T_last_current.matrix()), gtsam::noiseModel::Diagonal::Sigmas(registration_sigmas));
+  // The target model is an accumulated odometry estimate, not an independent
+  // observation in the world frame. An absolute pose prior here reintroduces
+  // its drift on every scan and prevents IMU/height corrections accumulating.
 
   update_target(current, T_target_imu);
   last_T_target_imu = T_target_imu;

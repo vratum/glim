@@ -29,6 +29,8 @@ public:
   int max_iterations;               ///< Maximum number of iterations
   int lru_thresh;                   ///< LRU cache threshold
   double target_downsampling_rate;  ///< Downsampling rate for points to be inserted into the target
+  double registration_rotation_sigma_rad;  ///< Relative rotation residual sigma [rad], empirical fusion weight
+  double registration_translation_sigma_m;  ///< Relative translation residual sigma [m], empirical fusion weight
 
   double ivox_resolution;  ///< iVox resolution (for GICP)
   double ivox_min_dist;    ///< Minimum distance between points in an iVox cell (for GICP)

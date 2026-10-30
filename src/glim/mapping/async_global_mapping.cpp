@@ -1,8 +1,10 @@
 #include <glim/mapping/async_global_mapping.hpp>
 
 #include <spdlog/spdlog.h>
+#include <stdexcept>
 
 #include <glim/util/logging.hpp>
+#include <glim/util/config.hpp>
 #include <glim/mapping/callbacks.hpp>
 
 namespace glim {
@@ -49,11 +51,19 @@ void AsyncGlobalMapping::join() {
   end_of_sequence = true;
   if (thread.joinable()) {
     thread.join();
+    // A late loop can require several nonlinear updates after the final input.
+    // Drain those updates before saving; join() may also be called again by the
+    // destructor, so only finalize when the worker was actually joined here.
+    Config config(GlobalConfig::get_config_path("config_global_mapping"));
+    const int final_updates = config.param<int>("global_mapping", "final_optimization_iterations", 0);
+    if (final_updates < 0 || final_updates > 100) {
+      throw std::invalid_argument("final_optimization_iterations must be in [0,100]");
+    }
+    for (int i = 0; i < final_updates; ++i) {
+      logger->info("final global optimization update {}/{}", i+1, final_updates);
+      global_mapping->optimize();
+    }
   }
-
-  // for (int i = 0; i < 64; i++) {
-  //   global_mapping->optimize();
-  // }
 }
 
 int AsyncGlobalMapping::workload() const {

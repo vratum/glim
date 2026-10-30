@@ -15,6 +15,8 @@ CallbackSlot<void(const gtsam_points::LevenbergMarquardtOptimizationStatus&, con
 CallbackSlot<void(const SubMap::ConstPtr&)> SubMappingCallbacks::on_new_submap;
 
 // global mapping
+CallbackSlot<void(const std::vector<SubMap::Ptr>&, const std::vector<SubMap::Ptr>&, SessionAlignment&)> GlobalMappingCallbacks::on_align_session;
+CallbackSlot<void(const SubMap::ConstPtr&, gtsam::NonlinearFactorGraph&, gtsam::Values&)> GlobalMappingCallbacks::on_independent_session_submap;
 #ifdef GLIM_USE_OPENCV
 CallbackSlot<void(const double, const cv::Mat&)> GlobalMappingCallbacks::on_insert_image;
 #endif

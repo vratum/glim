@@ -36,6 +36,9 @@ public:
   double keyframe_update_interval_rot;
   double keyframe_update_interval_trans;
   double max_keyframe_overlap;
+  // Number of tail keyframes copied into the next submap.  Zero preserves
+  // the upstream disjoint-submap behaviour.
+  int submap_overlap_keyframes;
 
   bool create_between_factors;
   std::string between_registration_type;
@@ -67,7 +70,10 @@ public:
   virtual std::vector<SubMap::Ptr> submit_end_of_sequence() override;
 
 private:
+  void process_delayed_frame();
   void insert_keyframe(const int current, const EstimationFrame::ConstPtr& odom_frame);
+
+  void reset_with_carryover();
 
   SubMap::Ptr create_submap(bool force_create = false) const;
 

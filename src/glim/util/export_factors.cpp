@@ -14,6 +14,8 @@
 #include <gtsam_points/factors/linear_damping_factor.hpp>
 #include <gtsam_points/factors/rotate_vector3_factor.hpp>
 
+#include <glim/factors/reference_height_factor.hpp>
+BOOST_CLASS_EXPORT_GUID(glim::ReferenceHeightFactor, "glim::ReferenceHeightFactor");
 BOOST_CLASS_EXPORT_GUID(gtsam::noiseModel::Unit, "gtsam_noiseModel::Unit");
 BOOST_CLASS_EXPORT_GUID(gtsam::noiseModel::Constrained, "gtsam_noiseModel::Constrained");
 BOOST_CLASS_EXPORT_GUID(gtsam::noiseModel::Base, "gtsam::noiseModel::Base");

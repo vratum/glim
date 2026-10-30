@@ -29,6 +29,12 @@ IMUIntegration::IMUIntegration(const IMUIntegrationParams& params) {
 
 IMUIntegration::~IMUIntegration() {}
 
+void IMUIntegration::set_world_gravity(const Eigen::Vector3d& gravity) {
+  auto parameters = std::make_shared<gtsam::PreintegrationParams>(*imu_measurements->params());
+  parameters->n_gravity = gravity;
+  imu_measurements = std::make_shared<gtsam::PreintegratedImuMeasurements>(parameters);
+}
+
 void IMUIntegration::insert_imu(double stamp, const Eigen::Vector3d& linear_acc, const Eigen::Vector3d& angular_vel) {
   Eigen::Matrix<double, 7, 1> imu;
   imu << stamp, linear_acc, angular_vel;

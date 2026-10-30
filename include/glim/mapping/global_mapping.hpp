@@ -4,6 +4,7 @@
 #include <memory>
 #include <random>
 #include <glim/mapping/global_mapping_base.hpp>
+#include <glim/mapping/session_alignment.hpp>
 
 namespace gtsam {
 class Values;
@@ -33,6 +34,8 @@ public:
   bool enable_imu;
   bool enable_optimization;
   bool enable_between_factors;
+  bool require_session_alignment;
+  bool emit_callbacks = true;  // Internal independent-save mapper must not replay extensions.
   std::string between_registration_type;
 
   std::string registration_error_factor_type;
@@ -78,6 +81,9 @@ public:
   bool load(const std::string& path) override;
 
 private:
+  void insert_aligned_submap(const SubMap::Ptr& submap);
+  bool align_pending_session();
+  void save_pending_session(const std::string& path);
   void insert_submap(int current, const SubMap::Ptr& submap);
 
   std::shared_ptr<gtsam::NonlinearFactorGraph> create_between_factors(int current) const;
@@ -95,6 +101,13 @@ private:
 
   std::mt19937 mt;
   int session_id;
+  bool session_aligned = false;
+  Eigen::Isometry3d T_map_session = Eigen::Isometry3d::Identity();
+  std::vector<SubMap::Ptr> pending_session;
+  std::vector<SessionConstraint> session_constraints;
+  int session_start_index = 0;
+  struct PendingIMU { double stamp; Eigen::Vector3d acc, gyro; };
+  std::vector<PendingIMU> pending_imu;
 
   std::unique_ptr<IMUIntegration> imu_integration;
   std::any stream_buffer_roundrobin;

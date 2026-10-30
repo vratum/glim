@@ -35,6 +35,7 @@ public:
    * @param angular_vel Angular velocity
    */
   void insert_imu(double stamp, const Eigen::Vector3d& linear_acc, const Eigen::Vector3d& angular_vel);
+  void set_world_gravity(const Eigen::Vector3d& gravity);
 
   /**
    * @brief Integrate IMU measurements in a time range

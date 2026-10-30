@@ -2,6 +2,7 @@
 
 #include <map>
 #include <unordered_set>
+#include <set>
 #include <spdlog/spdlog.h>
 #include <boost/filesystem.hpp>
 
@@ -52,6 +53,7 @@ GlobalMappingParams::GlobalMappingParams() {
 
   enable_imu = config.param<bool>("global_mapping", "enable_imu", true);
   enable_optimization = config.param<bool>("global_mapping", "enable_optimization", true);
+  require_session_alignment = config.param<bool>("global_mapping", "require_session_alignment", false);
 
   enable_between_factors = config.param<bool>("global_mapping", "create_between_factors", false);
   between_registration_type = config.param<std::string>("global_mapping", "between_registration_type", "GICP");
@@ -118,23 +120,71 @@ GlobalMapping::GlobalMapping(const GlobalMappingParams& params) : params(params)
 GlobalMapping::~GlobalMapping() {}
 
 void GlobalMapping::insert_imu(const double stamp, const Eigen::Vector3d& linear_acc, const Eigen::Vector3d& angular_vel) {
-  Callbacks::on_insert_imu(stamp, linear_acc, angular_vel);
+  if (params.emit_callbacks) Callbacks::on_insert_imu(stamp, linear_acc, angular_vel);
+  if (params.require_session_alignment && !session_aligned) pending_imu.push_back({stamp, linear_acc, angular_vel});
   if (params.enable_imu) {
     imu_integration->insert_imu(stamp, linear_acc, angular_vel);
   }
 }
 
 void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
+  if (params.require_session_alignment && !session_aligned) {
+    pending_session.push_back(submap);
+    align_pending_session();
+    return;
+  }
+  insert_aligned_submap(submap);
+}
+
+bool GlobalMapping::align_pending_session() {
+  if (pending_session.empty()) return false;
+  if (!Callbacks::on_align_session) throw std::runtime_error("Session alignment extension is required");
+  SessionAlignment alignment;
+  Callbacks::on_align_session(submaps, pending_session, alignment);
+  if (!alignment.accepted) return false;
+  if (!alignment.T_map_session.matrix().allFinite() ||
+      !alignment.T_map_session.linear().isUnitary(1e-6) ||
+      std::abs(alignment.T_map_session.linear().determinant()-1) > 1e-6)
+    throw std::runtime_error("Invalid session alignment transform");
+  std::set<int> targets, sources;
+  for (const auto& constraint : alignment.constraints) {
+    if (constraint.reference_id < 0 || constraint.reference_id >= submaps.size() ||
+        constraint.pending_id < 0 || constraint.pending_id >= pending_session.size() ||
+        !constraint.T_reference_source.matrix().allFinite())
+      throw std::runtime_error("Invalid inter-session constraint");
+    targets.insert(constraint.reference_id);
+    sources.insert(constraint.pending_id);
+  }
+  if (sources.size() < 3 || targets.size() < 2) throw std::runtime_error("Insufficient independent session matches");
+  T_map_session = alignment.T_map_session;
+  // A reference CT map may use a tilted world. Rotate the new session's
+  // gravity together with its poses; never silently keep map-Z gravity.
+  imu_integration->set_world_gravity(T_map_session.linear()*imu_integration->integrated_measurements().params()->n_gravity);
+  session_constraints = alignment.constraints;
+  session_start_index = submaps.size();
+  session_aligned = true;
+  auto pending = std::move(pending_session);
+  pending_session.clear();
+  for (const auto& submap : pending) insert_aligned_submap(submap);
+  pending_imu.clear();
+  logger->info("Attached new session with {} verified inter-session constraints", session_constraints.size());
+  return true;
+}
+
+void GlobalMapping::insert_aligned_submap(const SubMap::Ptr& submap) {
   logger->debug("insert_submap id={} |frame|={}", submap->id, submap->frame->size());
 
   const int current = submaps.size();
   const int last = current - 1;
+  const bool session_boundary = current > 0 && submaps.back()->session_id != session_id;
+  submap->id = current;
+  submap->session_id = session_id;
   insert_submap(current, submap);
 
   gtsam::Pose3 current_T_world_submap = gtsam::Pose3::Identity();
   gtsam::Pose3 last_T_world_submap = gtsam::Pose3::Identity();
 
-  if (current != 0) {
+  if (current != 0 && !session_boundary) {
     if (isam2->valueExists(X(last))) {
       last_T_world_submap = isam2->calculateEstimate<gtsam::Pose3>(X(last));
     } else {
@@ -148,18 +198,32 @@ void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
 
     current_T_world_submap = last_T_world_submap * gtsam::Pose3(T_origin0_origin1.matrix());
   } else {
-    current_T_world_submap = gtsam::Pose3(submap->T_world_origin.matrix());
+    current_T_world_submap = gtsam::Pose3((T_map_session * submap->T_world_origin).matrix());
   }
 
   new_values->insert(X(current), current_T_world_submap);
+  // Velocities in frames still use the local submapping world. Preserve that
+  // orientation before replacing the origin with the corrected global pose.
+  const Eigen::Matrix3d R_origin_local_world = submap->T_world_origin.linear().transpose();
   submap->T_world_origin = Eigen::Isometry3d(current_T_world_submap.matrix());
+  submap->custom_data["session_gravity_axis"] = std::make_shared<Eigen::Vector3d>((T_map_session.linear()*Eigen::Vector3d::UnitZ()).eval());
 
-  Callbacks::on_insert_submap(submap);
+  if (params.emit_callbacks) Callbacks::on_insert_submap(submap);
 
   submap->drop_frame_points();
 
-  if (current == 0) {
-    new_factors->emplace_shared<gtsam_points::LinearDampingFactor>(X(0), 6, params.init_pose_damping_scale);
+  bool anchored_session = false;
+  for (const auto& constraint : session_constraints) {
+    if (session_start_index + constraint.pending_id != current) continue;
+    gtsam::Vector6 sigmas;
+    sigmas << 0.05,0.05,0.05,0.25,0.25,0.25;
+    new_factors->emplace_shared<gtsam::BetweenFactor<gtsam::Pose3>>(
+      X(constraint.reference_id), X(current), gtsam::Pose3(constraint.T_reference_source.matrix()),
+      gtsam::noiseModel::Diagonal::Sigmas(sigmas));
+    anchored_session = true;
+  }
+  if (current == 0 || (session_boundary && !anchored_session)) {
+    new_factors->emplace_shared<gtsam_points::LinearDampingFactor>(X(current), 6, params.init_pose_damping_scale);
   } else {
     new_factors->add(*create_between_factors(current));
     new_factors->add(*create_matching_cost_factors(current));
@@ -175,8 +239,8 @@ void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
     const gtsam::imuBias::ConstantBias imu_biasL(submap->frames.front()->imu_bias);
     const gtsam::imuBias::ConstantBias imu_biasR(submap->frames.back()->imu_bias);
 
-    const Eigen::Vector3d v_origin_imuL = submap->T_world_origin.linear().inverse() * submap->frames.front()->v_world_imu;
-    const Eigen::Vector3d v_origin_imuR = submap->T_world_origin.linear().inverse() * submap->frames.back()->v_world_imu;
+    const Eigen::Vector3d v_origin_imuL = R_origin_local_world * submap->frames.front()->v_world_imu;
+    const Eigen::Vector3d v_origin_imuR = R_origin_local_world * submap->frames.back()->v_world_imu;
 
     const auto prior_noise3 = gtsam::noiseModel::Isotropic::Precision(3, 1e6);
     const auto prior_noise6 = gtsam::noiseModel::Isotropic::Precision(6, 1e6);
@@ -200,7 +264,7 @@ void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
     new_factors->emplace_shared<gtsam_points::RotateVector3Factor>(X(current), V(current * 2 + 1), v_origin_imuR, prior_noise3);
     new_factors->emplace_shared<gtsam::PriorFactor<gtsam::imuBias::ConstantBias>>(B(current * 2 + 1), imu_biasR, prior_noise6);
 
-    if (current != 0) {
+    if (current != 0 && !session_boundary) {
       const double stampL = submaps[last]->frames.back()->stamp;
       const double stampR = submaps[current]->frames.front()->stamp;
 
@@ -220,15 +284,16 @@ void GlobalMapping::insert_submap(const SubMap::Ptr& submap) {
 
   logger->debug("|new_factors|={} |new_values|={}", new_factors->size(), new_values->size());
 
-  Callbacks::on_smoother_update(*isam2, *new_factors, *new_values);
+  if (params.emit_callbacks) Callbacks::on_smoother_update(*isam2, *new_factors, *new_values);
+  else Callbacks::on_independent_session_submap(submap,*new_factors,*new_values);
   auto result = update_isam2(*new_factors, *new_values);
-  Callbacks::on_smoother_update_result(*isam2, result);
+  if (params.emit_callbacks) Callbacks::on_smoother_update_result(*isam2, result);
 
   new_values.reset(new gtsam::Values);
   new_factors.reset(new gtsam::NonlinearFactorGraph);
 
   update_submaps();
-  Callbacks::on_update_submaps(submaps);
+  if (params.emit_callbacks) Callbacks::on_update_submaps(submaps);
 }
 
 void GlobalMapping::insert_submap(int current, const SubMap::Ptr& submap) {
@@ -309,6 +374,7 @@ void GlobalMapping::find_overlapping_submaps(double min_overlap) {
   double squared_max_implicit_loop_distance = params.max_implicit_loop_distance * params.max_implicit_loop_distance;
   for (int i = 0; i < submaps.size(); i++) {
     for (int j = i + 1; j < submaps.size(); j++) {
+      if (params.require_session_alignment && submaps[i]->session_id != submaps[j]->session_id) continue;
       if (existing_factors.count(Eigen::Vector3i(i, j, 0))) {
         continue;
       }
@@ -346,15 +412,15 @@ void GlobalMapping::find_overlapping_submaps(double min_overlap) {
 
   logger->info("new overlapping {} submap pairs found", new_factors->size());
 
-  Callbacks::on_smoother_update(*isam2, *new_factors, *new_values);
+  if (params.emit_callbacks) Callbacks::on_smoother_update(*isam2, *new_factors, *new_values);
   auto result = update_isam2(*new_factors, *new_values);
-  Callbacks::on_smoother_update_result(*isam2, result);
+  if (params.emit_callbacks) Callbacks::on_smoother_update_result(*isam2, result);
 
   new_factors->resize(0);
   new_values->clear();
 
   update_submaps();
-  Callbacks::on_update_submaps(submaps);
+  if (params.emit_callbacks) Callbacks::on_update_submaps(submaps);
 }
 
 void GlobalMapping::optimize() {
@@ -364,16 +430,16 @@ void GlobalMapping::optimize() {
 
   logger->debug("|new_factors|={} |new_values|={}", new_factors->size(), new_values->size());
 
-  Callbacks::on_smoother_update(*isam2, *new_factors, *new_values);
+  if (params.emit_callbacks) Callbacks::on_smoother_update(*isam2, *new_factors, *new_values);
   auto result = update_isam2(*new_factors, *new_values);
 
   new_factors.reset(new gtsam::NonlinearFactorGraph);
   new_values.reset(new gtsam::Values);
 
-  Callbacks::on_smoother_update_result(*isam2, result);
+  if (params.emit_callbacks) Callbacks::on_smoother_update_result(*isam2, result);
 
   update_submaps();
-  Callbacks::on_update_submaps(submaps);
+  if (params.emit_callbacks) Callbacks::on_update_submaps(submaps);
 }
 
 std::shared_ptr<gtsam::NonlinearFactorGraph> GlobalMapping::create_between_factors(int current) const {
@@ -383,6 +449,7 @@ std::shared_ptr<gtsam::NonlinearFactorGraph> GlobalMapping::create_between_facto
   }
 
   const int last = current - 1;
+  if (submaps[last]->session_id != submaps[current]->session_id) return factors;
   const gtsam::Pose3 init_delta = gtsam::Pose3((submaps[last]->T_world_origin.inverse() * submaps[current]->T_world_origin).matrix());
 
   if (params.between_registration_type == "NONE") {
@@ -439,6 +506,8 @@ std::shared_ptr<gtsam::NonlinearFactorGraph> GlobalMapping::create_matching_cost
   double squared_max_implicit_loop_distance = params.max_implicit_loop_distance * params.max_implicit_loop_distance;
 
   for (int i = 0; i < current; i++) {
+    // Only explicitly verified geometry may bridge physical recording sessions.
+    if (submaps[i]->session_id != current_submap->session_id) continue;
     const double squared_dist = (submaps[i]->T_world_origin.translation() - current_submap->T_world_origin.translation()).squaredNorm();
     if (squared_dist > squared_max_implicit_loop_distance) {
       continue;
@@ -472,7 +541,8 @@ std::shared_ptr<gtsam::NonlinearFactorGraph> GlobalMapping::create_matching_cost
     }
   }
 
-  if (previous_overlap < std::max(0.25, params.min_implicit_loop_overlap)) {
+  if (submaps[current-1]->session_id == current_submap->session_id &&
+      previous_overlap < std::max(0.25, params.min_implicit_loop_overlap)) {
     logger->warn("previous submap has only a small overlap with the current submap ({})", previous_overlap);
     logger->warn("create a between factor to prevent the submap from being isolated");
     const int last = current - 1;
@@ -544,6 +614,10 @@ gtsam_points::ISAM2ResultExt GlobalMapping::update_isam2(const gtsam::NonlinearF
 }
 
 void GlobalMapping::save(const std::string& path) {
+  if (!pending_session.empty() && !align_pending_session()) {
+    save_pending_session(path);
+    return;
+  }
   optimize();
 
   boost::filesystem::create_directories(path);
@@ -632,6 +706,23 @@ void GlobalMapping::save(const std::string& path) {
 
   logger->info("saving config");
   GlobalConfig::instance()->dump(path + "/config");
+  if (params.require_session_alignment && session_aligned) {
+    std::ofstream(path + "/session_alignment.json") << "{\"state\":\"attached\",\"reference_submaps\":" << session_start_index << "}\n";
+  }
+}
+
+void GlobalMapping::save_pending_session(const std::string& path) {
+  // Never discard the exploratory drive or export mixed, unaligned frames.
+  // This independent dump remains usable even when global matching abstains.
+  auto independent_params = params;
+  independent_params.require_session_alignment = false;
+  independent_params.emit_callbacks = false;
+  GlobalMapping independent(independent_params);
+  for (const auto& sample : pending_imu) independent.insert_imu(sample.stamp, sample.acc, sample.gyro);
+  for (const auto& pending : pending_session) independent.insert_submap(std::make_shared<SubMap>(*pending));
+  independent.save(path);
+  std::ofstream(path + "/session_alignment.json") << "{\"state\":\"unlocalized\",\"independent_session_saved\":true}\n";
+  logger->warn("No verified attachment; saved the new recording as an independent map");
 }
 
 
@@ -695,6 +786,8 @@ bool GlobalMapping::load(const std::string& path) {
   }
 
   const int start_from_frame_id = submaps.size();
+  const int loaded_session_base = session_id;
+  int next_session_id = session_id + 1;
 
   std::string token;
   int num_submaps, num_all_frames, num_matching_cost_factors;
@@ -718,7 +811,8 @@ bool GlobalMapping::load(const std::string& path) {
       return false;
     }
     submap->id += start_from_frame_id;
-    submap->session_id = session_id;
+    submap->session_id += loaded_session_base;
+    next_session_id = std::max(next_session_id, submap->session_id + 1);
 
     // Adaptively determine the voxel resolution based on the median distance
     const int max_scan_count = 256;
@@ -760,7 +854,7 @@ bool GlobalMapping::load(const std::string& path) {
       }
     }
 
-    Callbacks::on_insert_submap(submap);
+    if (params.emit_callbacks) Callbacks::on_insert_submap(submap);
   }
 
   gtsam::Values values, loaded_values;
@@ -891,12 +985,12 @@ bool GlobalMapping::load(const std::string& path) {
 
   if (start_from_frame_id <= 0) {
     logger->info("optimize");
-    Callbacks::on_smoother_update(*isam2, graph, values);
+    if (params.emit_callbacks) Callbacks::on_smoother_update(*isam2, graph, values);
     auto result = update_isam2(graph, values);
-    Callbacks::on_smoother_update_result(*isam2, result);
+    if (params.emit_callbacks) Callbacks::on_smoother_update_result(*isam2, result);
 
     update_submaps();
-    Callbacks::on_update_submaps(submaps);
+    if (params.emit_callbacks) Callbacks::on_update_submaps(submaps);
   } else {
     logger->info("skip optimization");
     this->new_factors->add(graph);
@@ -904,7 +998,7 @@ bool GlobalMapping::load(const std::string& path) {
   }
 
   logger->info("done");
-  session_id++;
+  session_id = next_session_id;
 
   return true;
 }

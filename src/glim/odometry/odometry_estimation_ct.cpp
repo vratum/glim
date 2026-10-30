@@ -315,4 +315,18 @@ EstimationFrame::ConstPtr OdometryEstimationCT::insert_frame(const PreprocessedF
   return new_frame;
 }
 
+std::vector<EstimationFrame::ConstPtr> OdometryEstimationCT::get_remaining_frames() {
+  // AsyncOdometryEstimation calls this after draining the input queue. Without
+  // this override the last smoother_lag seconds never reach sub/global mapping.
+  std::vector<EstimationFrame::ConstPtr> remaining;
+  for (; marginalized_cursor < frames.size(); marginalized_cursor++) {
+    if (frames[marginalized_cursor]) {
+      remaining.push_back(frames[marginalized_cursor]);
+      frames[marginalized_cursor].reset();
+    }
+  }
+  Callbacks::on_marginalized_frames(remaining);
+  return remaining;
+}
+
 }  // namespace glim

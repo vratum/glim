@@ -67,6 +67,7 @@ public:
   virtual bool requires_imu() const override { return false; }
 
   virtual EstimationFrame::ConstPtr insert_frame(const PreprocessedFrame::Ptr& frame, std::vector<EstimationFrame::ConstPtr>& marginalized_frames) override;
+  virtual std::vector<EstimationFrame::ConstPtr> get_remaining_frames() override;
 
 private:
   using Params = OdometryEstimationCTParams;

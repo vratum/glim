@@ -46,6 +46,8 @@ void SubMap::save(const std::string& path) const {
     ofs << "v_world_imu: " << frames[i]->v_world_imu.transpose() << std::endl;
   }
 
+  // Optional trailing field keeps older dumps readable.
+  ofs << "session_id: " << session_id << std::endl;
   std::ofstream ofs_imu_rate(path + "/imu_rate.txt");
   for (const auto& frame : frames) {
     if (!frame->imu_rate_trajectory.size()) {
@@ -198,6 +200,7 @@ SubMap::Ptr SubMap::load(const std::string& path) {
     spdlog::warn("no points in {}", path);
   }
 
+  if (ifs >> token && token == "session_id:") ifs >> submap->session_id;
   submap->frame = frame;
 
   return submap;

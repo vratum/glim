@@ -1,5 +1,6 @@
 #include <glim/mapping/sub_mapping.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <spdlog/spdlog.h>
 #include <gtsam/inference/Symbol.h>
@@ -51,6 +52,7 @@ SubMappingParams::SubMappingParams() {
   keyframe_update_interval_rot = config.param<double>("sub_mapping", "keyframe_update_interval_rot", 3.15);
   keyframe_update_interval_trans = config.param<double>("sub_mapping", "keyframe_update_interval_trans", 1.0);
   max_keyframe_overlap = config.param<double>("sub_mapping", "max_keyframe_overlap", 0.8);
+  submap_overlap_keyframes = config.param<int>("sub_mapping", "submap_overlap_keyframes", 0);
 
   create_between_factors = config.param<bool>("sub_mapping", "create_between_factors", true);
   between_registration_type = config.param<std::string>("sub_mapping", "between_registration_type", "GICP");
@@ -106,15 +108,21 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
   Callbacks::on_insert_frame(odom_frame_);
 
   delayed_input_queue.emplace_back(odom_frame_);
-  if (delayed_input_queue.size() < 2) {
+  // Only IMU trajectory interpolation needs the next frame. Delaying CT here
+  // discards its final frame at end-of-sequence, even after odometry drains.
+  if (params.enable_imu && delayed_input_queue.size() < 2) {
     return;
   }
 
+  process_delayed_frame();
+}
+
+void SubMapping::process_delayed_frame() {
   EstimationFrame::Ptr odom_frame = delayed_input_queue.front()->clone();
   delayed_input_queue.pop_front();
-  EstimationFrame::ConstPtr next_frame = delayed_input_queue.front();
+  EstimationFrame::ConstPtr next_frame = delayed_input_queue.empty() ? nullptr : delayed_input_queue.front();
 
-  if (params.enable_imu) {
+  if (params.enable_imu && next_frame) {
     logger->debug("smoothing trajectory");
     // Smoothing IMU-based pose estimation
     gtsam::NavState nav_world_imu(gtsam::Pose3(odom_frame->T_world_imu.matrix()), odom_frame->v_world_imu);
@@ -328,12 +336,58 @@ void SubMapping::insert_frame(const EstimationFrame::ConstPtr& odom_frame_) {
     submap_queue.push_back(new_submap);
     Callbacks::on_new_submap(new_submap);
 
+    reset_with_carryover();
+  }
+}
+
+void SubMapping::reset_with_carryover() {
+  const int carry_count = std::clamp(params.submap_overlap_keyframes, 0, static_cast<int>(keyframes.size()));
+  if (carry_count == 0) {
     odom_frames.clear();
     keyframes.clear();
     keyframe_indices.clear();
     values.reset(new gtsam::Values);
     graph.reset(new gtsam::NonlinearFactorGraph);
+    return;
   }
+
+  // The existing submap was already emitted.  Seed the next one with its tail
+  // keyframes so adjacent maps contain real common LiDAR observations even at
+  // vehicle speed.  This is intentionally LiDAR-only: restarting an IMU
+  // preintegration graph with historic frames would require replaying its IMU
+  // buffer and is a different operation.
+  if (params.enable_imu) {
+    logger->warn("submap_overlap_keyframes is supported only when enable_imu=false; using disjoint submaps");
+    odom_frames.clear();
+    keyframes.clear();
+    keyframe_indices.clear();
+    values.reset(new gtsam::Values);
+    graph.reset(new gtsam::NonlinearFactorGraph);
+    return;
+  }
+
+  std::vector<EstimationFrame::Ptr> carryover;
+  carryover.reserve(carry_count);
+  for (int i = static_cast<int>(keyframes.size()) - carry_count; i < static_cast<int>(keyframes.size()); i++) {
+    carryover.emplace_back(keyframes[i]->clone());
+  }
+
+  odom_frames.clear();
+  keyframes.clear();
+  keyframe_indices.clear();
+  values.reset(new gtsam::Values);
+  graph.reset(new gtsam::NonlinearFactorGraph);
+
+  for (const auto& frame : carryover) {
+    const int index = static_cast<int>(odom_frames.size());
+    odom_frames.emplace_back(frame);
+    keyframes.emplace_back(frame);
+    keyframe_indices.emplace_back(index);
+    values->insert(X(index), gtsam::Pose3(frame->T_world_sensor().matrix()));
+  }
+  graph->emplace_shared<gtsam::PriorFactor<gtsam::Pose3>>(
+    X(0), values->at<gtsam::Pose3>(X(0)), gtsam::noiseModel::Isotropic::Precision(6, 1e8));
+  logger->info("seeded next LiDAR-only submap with {} carryover keyframes", carry_count);
 }
 
 void SubMapping::insert_keyframe(const int current, const EstimationFrame::ConstPtr& odom_frame) {
@@ -507,7 +561,14 @@ std::vector<SubMap::Ptr> SubMapping::get_submaps() {
 }
 
 std::vector<SubMap::Ptr> SubMapping::submit_end_of_sequence() {
+  // The final IMU frame has no following pose for interpolation. Keep its
+  // already estimated pose/velocity/bias and omit only the between-frame
+  // high-rate trajectory; do not discard the whole scan.
+  while (!delayed_input_queue.empty()) {
+    process_delayed_frame();
+  }
   std::vector<SubMap::Ptr> submaps;
+  submaps.swap(submap_queue);
   if (!odom_frames.empty()) {
     auto new_submap = create_submap(true);
 
