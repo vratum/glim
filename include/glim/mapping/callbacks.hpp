@@ -85,6 +85,9 @@ struct SubMappingCallbacks {
  *
  */
 struct GlobalMappingCallbacks {
+  // Called once after the input worker joins, before final graph refinements.
+  // Background constraint producers must finish here, not after save().
+  static CallbackSlot<void()> on_before_final_optimization;
   // Runs on the global mapping thread. Pending submaps are still in the new
   // session frame and have not entered the reference graph.
   static CallbackSlot<void(const std::vector<SubMap::Ptr>&, const std::vector<SubMap::Ptr>&, SessionAlignment&)> on_align_session;

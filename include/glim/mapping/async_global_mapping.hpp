@@ -83,7 +83,7 @@ public:
   }
 
 private:
-  void run();
+  void run(int online_iterations, int online_interval_ms);
 
 private:
   std::atomic_bool kill_switch;      ///< Flag to stop the thread immediately (Hard kill switch)

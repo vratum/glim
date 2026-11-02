@@ -31,6 +31,7 @@
 #include <gtsam_points/cuda/stream_temp_buffer_roundrobin.hpp>
 
 #include <glim/util/config.hpp>
+#include <glim/util/global_trajectory.hpp>
 #include <glim/util/serialization.hpp>
 #include <glim/common/imu_integration.hpp>
 #include <glim/mapping/callbacks.hpp>
@@ -689,17 +690,10 @@ void GlobalMapping::save(const std::string& path) {
       write_tum_frame(odom_imu_ofs, frame->stamp, frame->T_world_imu);
     }
 
-    const Eigen::Isometry3d T_world_endpoint_L = submaps[i]->T_world_origin * submaps[i]->T_origin_endpoint_L;
-    const Eigen::Isometry3d T_odom_lidar0 = submaps[i]->frames.front()->T_world_lidar;
-    const Eigen::Isometry3d T_odom_imu0 = submaps[i]->frames.front()->T_world_imu;
-
-    for (const auto& frame : submaps[i]->frames) {
-      const Eigen::Isometry3d T_world_imu = T_world_endpoint_L * T_odom_imu0.inverse() * frame->T_world_imu;
-      const Eigen::Isometry3d T_world_lidar = T_world_imu * frame->T_lidar_imu.inverse();
-
-      write_tum_frame(traj_imu_ofs, frame->stamp, T_world_imu);
-      write_tum_frame(traj_lidar_ofs, frame->stamp, T_world_lidar);
-    }
+    visit_global_trajectory(*submaps[i], [&](double stamp, const auto& T_world_imu, const auto& T_world_lidar) {
+      write_tum_frame(traj_imu_ofs, stamp, T_world_imu);
+      write_tum_frame(traj_lidar_ofs, stamp, T_world_lidar);
+    });
 
     submaps[i]->save((boost::format("%s/%06d") % path % i).str());
   }
