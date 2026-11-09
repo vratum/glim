@@ -1,4 +1,5 @@
 #include <glim/viewer/offline_viewer.hpp>
+#include <glim/viewer/interactive/georeference_panel.hpp>
 
 #include <boost/filesystem.hpp>
 #include <gtsam_points/config.hpp>
@@ -17,11 +18,27 @@ namespace glim {
 
 OfflineViewer::OfflineViewer(const std::string& init_map_path, const std::string& export_map_path) : init_map_path(init_map_path), export_map_path(export_map_path) {}
 
-OfflineViewer::~OfflineViewer() {}
+OfflineViewer::~OfflineViewer() {
+  // Stop UI callbacks before destroying the panel they capture.
+  kill_switch = true;
+  if (thread.joinable()) thread.join();
+}
 
 void OfflineViewer::setup_ui() {
   auto viewer = guik::LightViewer::instance();
   viewer->register_ui_callback("main_menu", [this] { main_menu(); });
+  georeference_panel.reset(new GeoreferencePanel);
+  viewer->register_ui_callback("georeference", [this] {
+    if (georeference_geometry_dirty) {
+      georeference_panel->update_geometry(submaps, submap_poses);
+      georeference_geometry_dirty = false;
+    }
+    if (save_georeference_pending) {
+      georeference_panel->save_map(pending_save_path);
+      save_georeference_pending = false;
+    }
+    georeference_panel->draw();
+  });
 
   progress_modal.reset(new guik::ProgressModal("offline_viewer_progress"));
 
@@ -125,6 +142,8 @@ void OfflineViewer::main_menu() {
         global_mapping = std::dynamic_pointer_cast<GlobalMapping>(async_global_mapping->get_global_mapping());
       }
 
+      pending_open_path = map_path;
+      pending_open_additional = static_cast<bool>(global_mapping);
       progress_modal->open<std::shared_ptr<GlobalMapping>>("open", [this, map_path, global_mapping](guik::ProgressInterface& progress) {
         return load_map(progress, map_path, global_mapping);
       });
@@ -136,6 +155,10 @@ void OfflineViewer::main_menu() {
       pfd::message("Error", "Failed to load map").result();
     } else {
       async_global_mapping.reset(new glim::AsyncGlobalMapping(*open_result, 1e6));
+      georeference_panel->open_map(pending_open_path, pending_open_additional);
+      georeference_geometry_dirty = true;
+      // Let the load popup close before opening another progress task.
+      return;
     }
   }
 
@@ -148,11 +171,13 @@ void OfflineViewer::main_menu() {
       const std::string path = pfd::select_folder("Select a directory to save the map", recent_files.most_recent()).result();
       if (!path.empty()) {
         recent_files.push(path);
+        pending_save_path = path;
         progress_modal->open<bool>("save", [this, path](guik::ProgressInterface& progress) { return save_map(progress, path); });
       }
     }
   }
   auto save_result = progress_modal->run<bool>("save");
+  if (save_result && *save_result) save_georeference_pending = true;
 
   // export map
   if (start_export_map) {
@@ -186,6 +211,7 @@ void OfflineViewer::main_menu() {
       logger->info("Closing map");
       async_global_mapping->join();
       async_global_mapping.reset();
+      georeference_panel->clear();
       clear();
     } else {
       logger->warn("No map to close");

@@ -578,6 +578,7 @@ void InteractiveViewer::globalmap_on_insert_submap(const SubMap::ConstPtr& subma
 
     submap_poses.push_back(*pose);
     submaps.push_back(submap);
+    on_submaps_changed();
     update_viewer();
   });
 }
@@ -593,6 +594,7 @@ void InteractiveViewer::globalmap_on_update_submaps(const std::vector<SubMap::Pt
     for (int i = 0; i < std::min(submaps.size(), poses.size()); i++) {
       submap_poses[i] = poses[i];
     }
+    on_submaps_changed();
     update_viewer();
   });
 }

@@ -29,6 +29,7 @@ endif()
 
 find_package(Boost REQUIRED serialization)
 find_package(Eigen3 REQUIRED)
+find_package(PROJ REQUIRED)
 find_package(GTSAM 4.2 REQUIRED)
 find_package(gtsam_points 1.2.2 REQUIRED)
 find_package(OpenMP REQUIRED)
@@ -71,6 +72,7 @@ add_library(glim SHARED
   src/glim/util/data_validator.cpp
   src/glim/util/serialization.cpp
   src/glim/util/debug.cpp
+  src/glim/util/georeference.cpp
   # preprocess
   src/glim/preprocess/callbacks.cpp
   src/glim/preprocess/cloud_preprocessor.cpp
@@ -117,6 +119,7 @@ target_link_libraries(glim
   Boost::boost
   Boost::serialization
   Eigen3::Eigen
+  PROJ::proj
   gtsam
   gtsam_points::gtsam_points
   OpenMP::OpenMP_CXX
@@ -128,6 +131,14 @@ if(BUILD_WITH_OPENCV)
   target_compile_definitions(glim PUBLIC GLIM_USE_OPENCV)
 endif()
 list(APPEND glim_LIBRARIES glim)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(test_georeference test/test_georeference.cpp)
+  target_link_libraries(test_georeference glim)
+  target_compile_options(test_georeference PRIVATE -UNDEBUG)
+  add_test(NAME georeference COMMAND test_georeference)
+endif()
 
 # Create shared libraries for estimation modules
 list(APPEND module_srcs
@@ -175,6 +186,7 @@ if(BUILD_WITH_VIEWER)
     src/glim/viewer/interactive_viewer.cpp
     src/glim/viewer/interactive/manual_loop_close_modal.cpp
     src/glim/viewer/interactive/bundle_adjustment_modal.cpp
+    src/glim/viewer/interactive/georeference_panel.cpp
     src/glim/viewer/offline_viewer.cpp
   )
   target_link_libraries(interactive_viewer

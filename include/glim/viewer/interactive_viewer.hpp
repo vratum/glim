@@ -53,6 +53,7 @@ protected:
   void viewer_loop();
 
   virtual void setup_ui() {}
+  virtual void on_submaps_changed() {}
 
   void invoke(const std::function<void()>& task);
   void drawable_selection();
