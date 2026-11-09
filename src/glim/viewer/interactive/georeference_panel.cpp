@@ -13,12 +13,14 @@ namespace glim {
 namespace {
 const ImVec4 warning(1.0f, 0.72f, 0.25f, 1.0f);
 const ImVec4 good(0.3f, 0.9f, 0.55f, 1.0f);
+const ImVec4 bad(1.0f, 0.25f, 0.25f, 1.0f);
 }
 
 void GeoreferencePanel::clear() {
   guik::LightViewer::instance()->remove_drawable(std::regex("georef_.*"));
   model = Georeference();
   geometry.clear();
+  control_diagnostics.clear();
   submaps.clear();
   cached_clouds.clear();
   map_path.clear();
@@ -37,6 +39,7 @@ void GeoreferencePanel::clear() {
 void GeoreferencePanel::open_map(const std::string& path, bool additional) {
   if (additional) {
     current = false;
+    control_diagnostics.clear();
     model.invalidate();
     message = "Maps merged. Existing controls stay on their original submaps; recalculate and Save Map.";
     return;
@@ -59,6 +62,7 @@ void GeoreferencePanel::save_map(const std::string& path) {
     try { model.fit(geometry); current = true; }
     catch (const std::exception& error) { current = false; message = error.what(); }
   }
+  refresh_diagnostics();
   persist();
 }
 
@@ -76,6 +80,7 @@ void GeoreferencePanel::update_geometry(const std::vector<SubMap::ConstPtr>& map
   }
   geometry = std::move(next);
   current = model.current(geometry);
+  refresh_diagnostics();
   if (model.solution && !current) message = "Map geometry changed. Recalculate the geographic alignment.";
   inspected.reset();
   markers_dirty = true;
@@ -92,6 +97,7 @@ void GeoreferencePanel::persist() {
 void GeoreferencePanel::changed() {
   model.invalidate();
   current = false;
+  control_diagnostics.clear();
   pick_mode = PickMode::NONE;
   inspected.reset();
   markers_dirty = true;
@@ -103,6 +109,16 @@ void GeoreferencePanel::edit(const GeographicControlPoint& point, int index) {
   editing_index = index;
   std::snprintf(editing_label.data(), editing_label.size(), "%s", point.label.c_str());
   editor_requested = true;
+}
+
+const GeoreferenceDiagnostic* GeoreferencePanel::diagnostic(const std::string& id) const {
+  const auto found = std::find_if(control_diagnostics.begin(), control_diagnostics.end(), [&](const auto& d) { return d.point_id == id; });
+  return found == control_diagnostics.end() ? nullptr : &*found;
+}
+
+void GeoreferencePanel::refresh_diagnostics() {
+  control_diagnostics = current ? model.diagnostics(geometry) : std::vector<GeoreferenceDiagnostic>();
+  markers_dirty = true;
 }
 
 void GeoreferencePanel::pick() {
@@ -158,13 +174,9 @@ void GeoreferencePanel::draw_editor() {
   ImGui::InputText("Name", editing_label.data(), editing_label.size());
   ImGui::InputDouble("Latitude", &editing.wgs84.latitude, 0, 0, "%.8f");
   ImGui::InputDouble("Longitude", &editing.wgs84.longitude, 0, 0, "%.8f");
-  ImGui::InputDouble("Horizontal accuracy (m)", &editing.accuracy_m, 1, 5, "%.1f");
-  ImGui::TextDisabled("Use 10 m for approximate manual coordinates.");
-  ImGui::TextDisabled("Accuracy is one standard deviation per horizontal axis.");
   const bool valid = std::isfinite(editing.wgs84.latitude) && std::abs(editing.wgs84.latitude) <= 90 &&
-    std::isfinite(editing.wgs84.longitude) && std::abs(editing.wgs84.longitude) <= 180 &&
-    std::isfinite(editing.accuracy_m) && editing.accuracy_m > 0;
-  if (!valid) ImGui::TextColored(warning, "Check latitude, longitude and positive accuracy.");
+    std::isfinite(editing.wgs84.longitude) && std::abs(editing.wgs84.longitude) <= 180;
+  if (!valid) ImGui::TextColored(warning, "Check latitude [-90,90] and longitude [-180,180].");
   ImGui::BeginDisabled(!valid);
   if (ImGui::Button(editing_index < 0 ? "Add coordinate" : "Apply changes", ImVec2(160,0))) {
     editing.label = editing_label.data();
@@ -186,25 +198,57 @@ void GeoreferencePanel::draw_markers() {
     for (std::size_t i = 0; i < model.points.size(); ++i) {
       const auto& point = model.points[i];
       if (!geometry.count(point.submap_id) || geometry.at(point.submap_id).cloud_id != point.cloud_id) continue;
+      const auto check = diagnostic(point.id);
+      const bool suspect = check && check->suspect;
       const Eigen::Vector3d world = geometry.at(point.submap_id).pose * point.point_in_submap;
-      const Eigen::Affine3f transform = Eigen::Translation3f(world.cast<float>()) * Eigen::UniformScaling<float>(selected == static_cast<int>(i) ? 0.35f : 0.22f);
-      const Eigen::Vector4f color = point.enabled ? Eigen::Vector4f(1,0.7f,0.1f,1) : Eigen::Vector4f(0.5f,0.5f,0.5f,1);
+      const Eigen::Affine3f transform = Eigen::Translation3f(world.cast<float>()) * Eigen::UniformScaling<float>(suspect ? 0.45f : selected == static_cast<int>(i) ? 0.35f : 0.22f);
+      const Eigen::Vector4f color = !point.enabled ? Eigen::Vector4f(0.5f,0.5f,0.5f,1) : suspect ? Eigen::Vector4f(1,0.15f,0.15f,1) : Eigen::Vector4f(1,0.7f,0.1f,1);
       viewer->update_sphere("georef_" + point.id, guik::FlatColor(color, transform).add("info_values", Eigen::Vector4i(0,0,0,0)));
+      if (suspect && check->suggested_position) {
+        const Eigen::Vector3f expected = check->suggested_position->cast<float>();
+        const Eigen::Affine3f ghost = Eigen::Translation3f(expected) * Eigen::UniformScaling<float>(0.65f);
+        viewer->update_sphere("georef_ghost_" + point.id,
+          guik::FlatColor(0.15f,1.0f,0.4f,0.3f,ghost).add("info_values",Eigen::Vector4i(0,0,0,0)).make_transparent());
+      }
     }
     markers_dirty = false;
   }
   const Eigen::Matrix4f camera = viewer->projection_matrix() * viewer->view_matrix();
   const auto size = viewer->canvas_size();
+  const auto project = [&](const Eigen::Vector3d& world) -> std::optional<ImVec2> {
+    const Eigen::Vector4f clip = camera * Eigen::Vector4f(world.x(),world.y(),world.z(),1);
+    if (clip.w() <= 0) return std::nullopt;
+    const Eigen::Vector3f ndc = clip.head<3>() / clip.w();
+    if (ndc.cwiseAbs().maxCoeff() > 1) return std::nullopt;
+    return ImVec2((ndc.x()+1)*0.5f*size.x(), (1-ndc.y())*0.5f*size.y());
+  };
+  const auto label = [&](const Eigen::Vector3d& world, const std::string& text, ImU32 color) {
+    if (const auto screen = project(world)) ImGui::GetBackgroundDrawList()->AddText(ImVec2(screen->x+8,screen->y),color,text.c_str());
+  };
   for (std::size_t i = 0; i < model.points.size(); ++i) {
     const auto& point = model.points[i];
-    if (!geometry.count(point.submap_id)) continue;
+    if (!geometry.count(point.submap_id) || geometry.at(point.submap_id).cloud_id != point.cloud_id) continue;
+    const auto check = diagnostic(point.id);
+    const bool suspect = check && check->suspect;
     const Eigen::Vector3d world = geometry.at(point.submap_id).pose * point.point_in_submap;
-    const Eigen::Vector4f clip = camera * Eigen::Vector4f(world.x(),world.y(),world.z(),1);
-    if (clip.w() <= 0) continue;
-    const Eigen::Vector3f ndc = clip.head<3>() / clip.w();
-    if (ndc.cwiseAbs().maxCoeff() > 1) continue;
-    const ImVec2 screen((ndc.x()+1)*0.5f*size.x()+8, (1-ndc.y())*0.5f*size.y());
-    ImGui::GetBackgroundDrawList()->AddText(screen, IM_COL32(255,200,60,255), (std::to_string(i+1) + ": " + point.label).c_str());
+    label(world,std::to_string(i+1) + ": " + point.label,suspect ? IM_COL32(255,65,65,255) : IM_COL32(255,200,60,255));
+    if (suspect && check->suggested_position) {
+      label(*check->suggested_position,std::to_string(i+1) + ": suggested location",IM_COL32(60,255,115,230));
+      const auto from = project(world), to = project(*check->suggested_position);
+      if (from && to) {
+        const Eigen::Vector2f delta(to->x-from->x,to->y-from->y);
+        if (delta.norm() > 20) {
+          const Eigen::Vector2f direction = delta.normalized(), side(-direction.y(),direction.x());
+          const Eigen::Vector2f start = Eigen::Vector2f(from->x,from->y)+6*direction;
+          const Eigen::Vector2f end = Eigen::Vector2f(to->x,to->y)-5*direction;
+          const Eigen::Vector2f base = end-12*direction;
+          auto draw = ImGui::GetBackgroundDrawList();
+          const ImU32 color = IM_COL32(60,255,115,190);
+          draw->AddLine(ImVec2(start.x(),start.y()),ImVec2(base.x(),base.y()),color,2);
+          draw->AddTriangleFilled(ImVec2(end.x(),end.y()),ImVec2(base.x()+5*side.x(),base.y()+5*side.y()),ImVec2(base.x()-5*side.x(),base.y()-5*side.y()),color);
+        }
+      }
+    }
   }
 }
 
@@ -214,7 +258,7 @@ void GeoreferencePanel::draw() {
   draw_markers();
   ImGui::SetNextWindowSize(ImVec2(620,510), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("Georeferencing - WGS84")) {
-    ImGui::TextWrapped("Add controls on recognisable map features. Approximate manual coordinates are expected (default accuracy: 10 m).");
+    ImGui::TextWrapped("Add controls on recognisable map features. Calculate alignment to check how well they agree.");
     if (!load_error.empty()) ImGui::TextColored(warning, "Could not load georeference.json: %s", load_error.c_str());
     ImGui::BeginDisabled(!load_error.empty() || geometry.empty());
     if (ImGui::Button("Add coordinate", ImVec2(150,32))) pick_mode = PickMode::ADD;
@@ -237,7 +281,7 @@ void GeoreferencePanel::draw() {
       if (ImGui::SmallButton("Cancel picking")) pick_mode = PickMode::NONE;
     }
     if (ImGui::BeginTable("controls", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable, ImVec2(0,180))) {
-      ImGui::TableSetupColumn("Control"); ImGui::TableSetupColumn("Latitude"); ImGui::TableSetupColumn("Longitude"); ImGui::TableSetupColumn("Error / accuracy (m)");
+      ImGui::TableSetupColumn("Control"); ImGui::TableSetupColumn("Latitude"); ImGui::TableSetupColumn("Longitude"); ImGui::TableSetupColumn("Deviation (m)");
       ImGui::TableHeadersRow();
       for (std::size_t i = 0; i < model.points.size(); ++i) {
         auto& p = model.points[i];
@@ -247,9 +291,11 @@ void GeoreferencePanel::draw() {
         ImGui::TableNextColumn(); ImGui::Text("%.7f", p.wgs84.latitude);
         ImGui::TableNextColumn(); ImGui::Text("%.7f", p.wgs84.longitude);
         ImGui::TableNextColumn();
-        auto residual = model.solution ? std::find_if(model.solution->residuals.begin(),model.solution->residuals.end(),[&](const auto& r) { return r.point_id == p.id; }) : std::vector<GeoreferenceResidual>::const_iterator();
-        if (current && residual != model.solution->residuals.end()) ImGui::TextColored(residual->high_residual ? warning : ImGui::GetStyleColorVec4(ImGuiCol_Text), "%.1f / %.1f%s", residual->metres, p.accuracy_m, residual->high_residual ? " !" : "");
-        else ImGui::Text("-- / %.1f", p.accuracy_m);
+        const auto check = diagnostic(p.id);
+        if (current && check) {
+          ImGui::TextColored(check->suspect ? bad : ImGui::GetStyleColorVec4(ImGuiCol_Text), "%.1f%s", check->deviation_m, check->suspect ? " !" : "");
+          if (ImGui::IsItemHovered()) ImGui::SetTooltip(check->independent_check ? "Checked against the other controls, excluding this point." : "Alignment residual; not enough independent support to suggest a correction.");
+        } else ImGui::TextUnformatted("--");
         ImGui::PopID();
       }
       ImGui::EndTable();
@@ -265,8 +311,8 @@ void GeoreferencePanel::draw() {
     ImGui::EndDisabled();
     ImGui::Separator();
     if (ImGui::Button("Calculate alignment", ImVec2(170,30))) {
-      try { model.fit(geometry); current = true; persist(); }
-      catch (const std::exception& error) { current = false; message = error.what(); }
+      try { model.fit(geometry); current = true; refresh_diagnostics(); persist(); }
+      catch (const std::exception& error) { current = false; refresh_diagnostics(); message = error.what(); }
     }
     ImGui::SameLine();
     if (ImGui::Button("Save coordinates", ImVec2(150,30))) persist();
@@ -278,10 +324,29 @@ void GeoreferencePanel::draw() {
     if (current) {
       const auto& s = *model.solution;
       ImGui::TextColored(good, "Alignment available: RMSE %.1f m, max %.1f m", s.rmse_m, s.max_error_m);
-      ImGui::Text("Control spread %.1f m; heading uncertainty ~%.1f deg", s.baseline_m, std::sqrt(s.covariance(2,2))*180/M_PI);
+      ImGui::Text("Control spread %.1f m", s.baseline_m);
       if (s.weak_geometry) ImGui::TextColored(warning, "Weak geometry: add more controls farther apart (4-6 recommended).");
       ImGui::TextWrapped("Errors are agreement with your controls, not proven GNSS accuracy. A common coordinate offset cannot be detected.");
-      ImGui::TextWrapped("Large residuals (!) receive less influence. Disable a control to exclude it completely.");
+      ImGui::TextColored(bad,"Red: inconsistent control");
+      ImGui::SameLine(); ImGui::TextColored(good,"Green ghost: suggested location");
+      ImGui::TextWrapped("Suggestions use the other controls. Check both the map position and WGS84; controls are never moved automatically.");
+      if (std::count_if(model.points.begin(),model.points.end(),[](const auto& p) { return p.enabled; }) < 4) {
+        ImGui::TextColored(warning,"Use at least 4 well-spread controls for reliable individual checks.");
+      } else if (std::any_of(control_diagnostics.begin(),control_diagnostics.end(),[](const auto& d) { return !d.independent_check; })) {
+        ImGui::TextColored(warning,"Some controls lack reliable support from the others.");
+      }
+      if (selected >= 0) {
+        const auto check = diagnostic(model.points.at(selected).id);
+        if (check && check->suspect && check->suggested_wgs84) {
+          ImGui::Text("Selected control disagrees with others by %.1f m.",check->deviation_m);
+          double latitude = check->suggested_wgs84->latitude, longitude = check->suggested_wgs84->longitude;
+          ImGui::TextDisabled("Suggested WGS84 at the current map point:");
+          ImGui::SetNextItemWidth(210);
+          ImGui::InputDouble("Suggested latitude",&latitude,0,0,"%.8f",ImGuiInputTextFlags_ReadOnly);
+          ImGui::SetNextItemWidth(210);
+          ImGui::InputDouble("Suggested longitude",&longitude,0,0,"%.8f",ImGuiInputTextFlags_ReadOnly);
+        }
+      }
     } else ImGui::TextColored(warning, "Alignment unavailable / needs calculation.");
     if (inspected) ImGui::Text("Selected point: latitude %.8f, longitude %.8f", inspected->latitude, inspected->longitude);
     if (!message.empty()) ImGui::TextWrapped("%s", message.c_str());

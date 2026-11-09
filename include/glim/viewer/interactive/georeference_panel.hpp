@@ -23,9 +23,12 @@ private:
   void changed();
   void persist();
   void draw_markers();
+  void refresh_diagnostics();
+  const GeoreferenceDiagnostic* diagnostic(const std::string& id) const;
 
   Georeference model;
   GeoreferenceGeometry geometry;
+  std::vector<GeoreferenceDiagnostic> control_diagnostics;
   std::vector<SubMap::ConstPtr> submaps;
   std::map<int, const gtsam_points::PointCloud*> cached_clouds;
   std::filesystem::path map_path;

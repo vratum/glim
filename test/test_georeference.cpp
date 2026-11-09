@@ -60,6 +60,7 @@ int main() {
   assert(noisy.solution->rmse_m > 5 && noisy.solution->rmse_m < 15);
   assert((projection.forward(noisy.solution->to_wgs84(probe)) - expected).norm() < 10);
   for (const auto& residual : noisy.solution->residuals) assert(!residual.high_residual);
+  for (const auto& diagnostic : noisy.diagnostics(geometry)) assert(!diagnostic.suspect);
 
   // A gross mistake is downweighted, not silently deleted.
   auto bad = model;
@@ -68,6 +69,39 @@ int main() {
   assert(bad.solution->residuals.back().high_residual);
   assert(bad.points.size() == model.points.size());
   assert((projection.forward(bad.solution->to_wgs84(probe)) - expected).norm() < 15);
+  const auto diagnostics = bad.diagnostics(geometry);
+  assert(diagnostics.size() == model.points.size());
+  int suspects = 0;
+  for (const auto& diagnostic : diagnostics) if (diagnostic.suspect) ++suspects;
+  assert(suspects == 1);
+  const auto& correction = diagnostics.back();
+  assert(correction.suspect && correction.independent_check);
+  const Eigen::Vector3d expected_position = locations.back() + Eigen::Vector3d((rotation.inverse() * Eigen::Vector2d(250,-200)).x(), (rotation.inverse() * Eigen::Vector2d(250,-200)).y(), 0);
+  assert(correction.suggested_position && (*correction.suggested_position - expected_position).norm() < 0.01);
+  assert(correction.suggested_wgs84 && (projection.forward(*correction.suggested_wgs84) - projection.forward(model.points.back().wgs84)).norm() < 0.01);
+  // A wrong map click is diagnosed too; suggestions never mutate the control.
+  auto wrong_click = model;
+  wrong_click.points.back().point_in_submap.x() += 50;
+  wrong_click.fit(geometry);
+  const auto click_correction = wrong_click.diagnostics(geometry).back();
+  assert(click_correction.suspect);
+  assert((*click_correction.suggested_position - locations.back()).norm() < 0.01);
+  assert(std::abs(wrong_click.points.back().point_in_submap.x() - model.points.back().point_in_submap.x() - 50) < 1e-8);
+  auto too_few = wrong_click;
+  too_few.points.erase(too_few.points.begin(), too_few.points.begin()+3);
+  too_few.fit(geometry);
+  for (const auto& d : too_few.diagnostics(geometry)) assert(!d.suspect && !d.suggested_position);
+
+  auto clustered = model;
+  clustered.points.resize(4);
+  for (auto& p : clustered.points) {
+    p.point_in_submap = geometry[7].pose.inverse() * ((geometry[7].pose * p.point_in_submap) * 0.005);
+    const Eigen::Vector3d world = geometry[7].pose * p.point_in_submap;
+    p.wgs84 = projection.reverse(rotation * world.head<2>() + translation);
+  }
+  clustered.points.back().wgs84 = projection.reverse(projection.forward(clustered.points.back().wgs84) + Eigen::Vector2d(50,0));
+  clustered.fit(geometry);
+  for (const auto& d : clustered.diagnostics(geometry)) assert(!d.suspect && !d.suggested_position);
   bad.points.back().accuracy_m = 10000;
   bad.fit(geometry);
   assert((projection.forward(bad.solution->to_wgs84(probe)) - expected).norm() < 0.1);

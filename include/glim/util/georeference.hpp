@@ -55,6 +55,16 @@ struct GeoreferenceResidual {
   bool high_residual = false;
 };
 
+struct GeoreferenceDiagnostic {
+  std::string point_id;
+  double deviation_m = 0.0;
+  bool independent_check = false;
+  bool suspect = false;
+  // Estimates from the other controls, with the original map height preserved.
+  std::optional<Eigen::Vector3d> suggested_position;
+  std::optional<GeographicCoordinate> suggested_wgs84;
+};
+
 struct GeoreferenceSolution {
   std::string geometry_fingerprint;
   std::string controls_fingerprint;
@@ -81,6 +91,7 @@ public:
   void invalidate();
   void fit(const GeoreferenceGeometry& geometry);
   bool current(const GeoreferenceGeometry& geometry) const;
+  std::vector<GeoreferenceDiagnostic> diagnostics(const GeoreferenceGeometry& geometry) const;
   void validate_anchors(const GeoreferenceGeometry& geometry) const;
   void save(const std::filesystem::path& path, const std::string& source_fingerprint = "") const;
   static Georeference load(const std::filesystem::path& path);

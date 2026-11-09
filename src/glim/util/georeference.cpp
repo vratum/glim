@@ -195,6 +195,73 @@ bool Georeference::current(const GeoreferenceGeometry& geometry) const {
   return true;
 }
 
+std::vector<GeoreferenceDiagnostic> Georeference::diagnostics(const GeoreferenceGeometry& geometry) const {
+  std::vector<GeoreferenceDiagnostic> result;
+  if (!current(geometry)) return result;
+  const auto active_count = std::count_if(points.begin(), points.end(), [](const auto& p) { return p.enabled; });
+  for (std::size_t index = 0; index < points.size(); ++index) {
+    const auto& point = points[index];
+    if (!point.enabled) continue;
+    GeoreferenceDiagnostic diagnostic;
+    diagnostic.point_id = point.id;
+    for (const auto& r : solution->residuals) if (r.point_id == point.id) diagnostic.deviation_m = r.metres;
+    if (active_count >= 4) {
+      // Leave this control out: a bad input must not pull its own correction.
+      auto others = *this;
+      others.points.erase(others.points.begin() + index);
+      for (auto& p : others.points) p.accuracy_m = 10.0;
+      try {
+        others.fit(geometry);
+        const auto& s = *others.solution;
+        std::vector<double> errors;
+        for (const auto& r : s.residuals) errors.push_back(r.metres);
+        std::sort(errors.begin(), errors.end());
+        const double median = 0.5 * (errors[(errors.size()-1)/2] + errors[errors.size()/2]);
+        // Rayleigh radial median -> per-axis sigma. The floor avoids treating
+        // ordinary +/-10 m manual scatter as a confidently identified mistake.
+        const double sigma = std::max(5.0, median / 1.1774100225);
+        std::vector<Eigen::Vector2d> support;
+        for (const auto& p : others.points) {
+          if (!p.enabled) continue;
+          const auto r = std::find_if(s.residuals.begin(), s.residuals.end(), [&](const auto& v) { return v.point_id == p.id; });
+          if (r != s.residuals.end() && r->metres <= 3 * sigma) {
+            support.push_back((s.horizontal_from_map * (geometry.at(p.submap_id).pose * p.point_in_submap)).head<2>());
+          }
+        }
+        double spread = 0;
+        for (std::size_t i = 0; i < support.size(); ++i) for (std::size_t j = 0; j < i; ++j) spread = std::max(spread, (support[i]-support[j]).norm());
+        const Eigen::Matrix3d covariance = s.covariance * (sigma * sigma / 100.0);
+        if (support.size() >= 3 && support.size()*2 > errors.size() && spread > 5*sigma &&
+            covariance(2,2) >= 0 && std::sqrt(covariance(2,2)) < 0.35) {
+          const Eigen::Vector3d world = geometry.at(point.submap_id).pose * point.point_in_submap;
+          const Eigen::Vector3d horizontal = s.horizontal_from_map * world;
+          Wgs84Projection projection(s.origin);
+          const Eigen::Vector2d measured = projection.forward(point.wgs84);
+          const gtsam::Pose2 pose(s.map_to_grid(0,2), s.map_to_grid(1,2), std::atan2(s.map_to_grid(1,0),s.map_to_grid(0,0)));
+          gtsam::Matrix23 jacobian;
+          const Eigen::Vector2d error = measured - pose.transformFrom(Eigen::Vector2d(horizontal.head<2>()), jacobian);
+          const Eigen::Matrix2d innovation = jacobian * covariance * jacobian.transpose() + Eigen::Matrix2d::Identity()*sigma*sigma;
+          const Eigen::LDLT<Eigen::Matrix2d> factor(innovation);
+          if (factor.info() == Eigen::Success && factor.isPositive()) {
+            diagnostic.independent_check = true;
+            diagnostic.deviation_m = error.norm();
+            diagnostic.suspect = error.dot(factor.solve(error)) > 3.5*3.5;
+            if (diagnostic.suspect) {
+              const Eigen::Vector3d predicted = s.map_to_grid.inverse() * Eigen::Vector3d(measured.x(),measured.y(),1);
+              diagnostic.suggested_position = s.horizontal_from_map.transpose() * Eigen::Vector3d(predicted.x(),predicted.y(),horizontal.z());
+              diagnostic.suggested_wgs84 = s.to_wgs84(world);
+            }
+          }
+        }
+      } catch (const std::exception&) {
+        // An underconstrained remainder provides no reliable correction.
+      }
+    }
+    result.push_back(diagnostic);
+  }
+  return result;
+}
+
 void Georeference::fit(const GeoreferenceGeometry& geometry) {
   invalidate();
   validate_anchors(geometry);
