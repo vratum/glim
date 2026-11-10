@@ -22,7 +22,7 @@ private:
   void draw_info();
   void edit(const GeographicControlPoint& point, int index);
   void changed();
-  void persist();
+  void persist(bool map_saved = false);
   void draw_markers();
   void refresh_diagnostics();
   const GeoreferenceDiagnostic* diagnostic(const std::string& id) const;

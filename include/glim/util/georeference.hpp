@@ -94,6 +94,8 @@ public:
   std::vector<GeoreferenceDiagnostic> diagnostics(const GeoreferenceGeometry& geometry) const;
   void validate_anchors(const GeoreferenceGeometry& geometry) const;
   void save(const std::filesystem::path& path, const std::string& source_fingerprint = "") const;
+  void save(const std::filesystem::path& path, const std::string& source_fingerprint,
+            const GeoreferenceGeometry& geometry) const;
   static Georeference load(const std::filesystem::path& path);
   static std::string fingerprint(const GeoreferenceGeometry& geometry);
   static std::string cloud_id(const gtsam_points::PointCloud& cloud);

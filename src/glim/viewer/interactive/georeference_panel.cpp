@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <limits>
 #include <regex>
+#include <nlohmann/json.hpp>
 #include <imgui.h>
 #include <guik/viewer/light_viewer.hpp>
 
@@ -63,7 +64,7 @@ void GeoreferencePanel::save_map(const std::string& path) {
     catch (const std::exception& error) { current = false; message = error.what(); }
   }
   refresh_diagnostics();
-  persist();
+  persist(true);
 }
 
 void GeoreferencePanel::update_geometry(const std::vector<SubMap::ConstPtr>& maps, const std::vector<Eigen::Isometry3d>& poses) {
@@ -86,11 +87,17 @@ void GeoreferencePanel::update_geometry(const std::vector<SubMap::ConstPtr>& map
   markers_dirty = true;
 }
 
-void GeoreferencePanel::persist() {
+void GeoreferencePanel::persist(bool map_saved) {
   if (map_path.empty() || !load_error.empty()) return;
   try {
     model.save(map_path / "georeference.json");
     message = "Coordinates saved.";
+    // Generic save notification for an external package exporter. The viewer
+    // neither knows the deployment layout nor blocks its UI on export work.
+    const auto event = nlohmann::json{{"path", map_path.string()},
+                                    {"kind", map_saved ? "map" : "georeference"}}.dump();
+    std::fprintf(stdout, "GLIM map saved: %s\n", event.c_str());
+    std::fflush(stdout);
   } catch (const std::exception& error) { message = std::string("Could not save coordinates: ") + error.what(); }
 }
 

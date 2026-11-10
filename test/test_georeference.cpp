@@ -5,6 +5,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <nlohmann/json.hpp>
 #include <iostream>
 #include <unistd.h>
 
@@ -133,6 +134,23 @@ int main() {
   assert(loaded.current(geometry));
   assert(loaded.points.size() == model.points.size());
   assert((projection.forward(loaded.solution->to_wgs84(probe)) - expected).norm() < 1e-5);
+  model.save(path, "prepared-geometry", geometry);
+  nlohmann::json snapshot;
+  { std::ifstream input(path); input >> snapshot; }
+  assert(snapshot.at("source_fingerprint") == "prepared-geometry");
+  assert(snapshot.at("points").size() == model.points.size());
+  for (std::size_t i = 0; i < locations.size(); ++i) {
+    for (int axis = 0; axis < 3; ++axis) {
+      assert(std::abs(snapshot["points"][i]["point_in_map"][axis].get<double>() - locations[i][axis]) < 1e-9);
+    }
+  }
+  auto single = model;
+  single.points.resize(1);
+  single.invalidate();
+  single.save(path, "prepared-geometry", geometry);
+  { std::ifstream input(path); input >> snapshot; }
+  assert(snapshot["points"].size() == 1 && !snapshot.contains("solution"));
+  assert(snapshot["points"][0].contains("point_in_map"));
   loaded.points[0].wgs84.latitude += 0.001;
   assert(!loaded.current(geometry));
   loaded.save(path);

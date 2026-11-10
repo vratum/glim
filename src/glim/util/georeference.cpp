@@ -318,6 +318,11 @@ void Georeference::fit(const GeoreferenceGeometry& geometry) {
 }
 
 void Georeference::save(const std::filesystem::path& path, const std::string& source_fingerprint) const {
+  save(path, source_fingerprint, GeoreferenceGeometry());
+}
+
+void Georeference::save(const std::filesystem::path& path, const std::string& source_fingerprint,
+                        const GeoreferenceGeometry& geometry) const {
   Json document{{"format_version", 1}, {"crs", "EPSG:4326"}, {"projection", "AEQD"},
                 {"up_in_map", array(up_in_map)}, {"points", Json::array()}};
   for (const auto& p : points) {
@@ -327,6 +332,15 @@ void Georeference::save(const std::filesystem::path& path, const std::string& so
       {"accuracy_m",p.accuracy_m}, {"enabled",p.enabled}});
   }
   if (!source_fingerprint.empty()) document["source_fingerprint"] = source_fingerprint;
+  if (!geometry.empty()) {
+    for (std::size_t i = 0; i < points.size(); ++i) {
+      const auto& point = points[i];
+      const auto submap = geometry.find(point.submap_id);
+      if (submap != geometry.end() && submap->second.cloud_id == point.cloud_id) {
+        document["points"][i]["point_in_map"] = array(Eigen::Vector3d(submap->second.pose * point.point_in_submap));
+      } else document["points"][i]["point_in_map"] = nullptr;
+    }
+  }
   if (solution) {
     const auto& s = *solution;
     document["solution"] = {{"geometry_fingerprint",s.geometry_fingerprint}, {"controls_fingerprint",s.controls_fingerprint}, {"origin_latitude",s.origin.latitude},
