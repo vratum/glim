@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -50,7 +51,11 @@ public:
   void clear();
 
 protected:
+  // Derived viewers start only after their own fields have been initialized.
+  explicit InteractiveViewer(bool start_thread);
+  void start();
   void viewer_loop();
+  void process_pending_tasks();
 
   virtual void setup_ui() {}
   virtual void on_submaps_changed() {}
@@ -81,6 +86,9 @@ protected:
   // Tasks to be executed in the GUI thread
   std::mutex invoke_queue_mutex;
   std::vector<std::function<void()>> invoke_queue;
+  bool viewer_dirty = false;
+  bool submaps_dirty = false;
+  std::array<int,5> callback_ids;
 
   // Visualization params
   int color_mode;

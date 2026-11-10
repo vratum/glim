@@ -75,6 +75,9 @@ public:
   /// Replay restored submaps after viewer extensions have subscribed.
   bool replay_submaps();
 
+  /// Serialize loading additional offline maps with graph optimization.
+  bool load(const std::string& path);
+
   gtsam_points::PointCloud::Ptr export_points();
 
   std::shared_ptr<glim::GlobalMappingBase> get_global_mapping() {
@@ -100,6 +103,9 @@ private:
   std::atomic_bool request_to_optimize;
   std::atomic_bool request_to_recover;
   std::atomic<double> request_to_find_overlapping_submaps;
+  int optimize_callback_id;
+  int recover_callback_id;
+  int overlap_callback_id;
 
   std::mutex global_mapping_mutex;
   std::shared_ptr<glim::GlobalMappingBase> global_mapping;

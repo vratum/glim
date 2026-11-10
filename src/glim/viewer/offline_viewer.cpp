@@ -16,12 +16,17 @@
 
 namespace glim {
 
-OfflineViewer::OfflineViewer(const std::string& init_map_path, const std::string& export_map_path) : init_map_path(init_map_path), export_map_path(export_map_path) {}
+OfflineViewer::OfflineViewer(const std::string& init_map_path, const std::string& export_map_path)
+: InteractiveViewer(false), init_map_path(init_map_path), export_map_path(export_map_path) { start(); }
 
 OfflineViewer::~OfflineViewer() {
   // Stop UI callbacks before destroying the panel they capture.
   kill_switch = true;
   if (thread.joinable()) thread.join();
+  // A load/save worker also captures this object. Finish it while all fields
+  // and the mapping backend are still alive.
+  progress_modal.reset();
+  async_global_mapping.reset();
 }
 
 void OfflineViewer::setup_ui() {
@@ -154,7 +159,7 @@ void OfflineViewer::main_menu() {
     if (!(*open_result)) {
       pfd::message("Error", "Failed to load map").result();
     } else {
-      async_global_mapping.reset(new glim::AsyncGlobalMapping(*open_result, 1e6));
+      if (!pending_open_additional) async_global_mapping.reset(new glim::AsyncGlobalMapping(*open_result, 1e6));
       georeference_panel->open_map(pending_open_path, pending_open_additional);
       georeference_geometry_dirty = true;
       // Let the load popup close before opening another progress task.
@@ -240,7 +245,8 @@ std::shared_ptr<glim::GlobalMapping> OfflineViewer::load_map(guik::ProgressInter
     global_mapping.reset(new glim::GlobalMapping(params));
   }
 
-  if (!global_mapping->load(path)) {
+  const bool loaded = pending_open_additional ? async_global_mapping->load(path) : global_mapping->load(path);
+  if (!loaded) {
     logger->error("failed to load {}", path);
     return nullptr;
   }

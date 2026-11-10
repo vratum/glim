@@ -25,9 +25,9 @@ AsyncGlobalMapping::AsyncGlobalMapping(const std::shared_ptr<glim::GlobalMapping
   request_to_recover = false;
   request_to_find_overlapping_submaps.store(-1.0);
 
-  GlobalMappingCallbacks::request_to_optimize.add([this] { request_to_optimize = true; });
-  GlobalMappingCallbacks::request_to_recover.add([this] { request_to_recover = true; });
-  GlobalMappingCallbacks::request_to_find_overlapping_submaps.add([this](double min_overlap) { request_to_find_overlapping_submaps.store(min_overlap); });
+  optimize_callback_id = GlobalMappingCallbacks::request_to_optimize.add([this] { request_to_optimize = true; });
+  recover_callback_id = GlobalMappingCallbacks::request_to_recover.add([this] { request_to_recover = true; });
+  overlap_callback_id = GlobalMappingCallbacks::request_to_find_overlapping_submaps.add([this](double min_overlap) { request_to_find_overlapping_submaps.store(min_overlap); });
 
   kill_switch = false;
   end_of_sequence = false;
@@ -35,6 +35,9 @@ AsyncGlobalMapping::AsyncGlobalMapping(const std::shared_ptr<glim::GlobalMapping
 }
 
 AsyncGlobalMapping::~AsyncGlobalMapping() {
+  GlobalMappingCallbacks::request_to_optimize.remove(optimize_callback_id);
+  GlobalMappingCallbacks::request_to_recover.remove(recover_callback_id);
+  GlobalMappingCallbacks::request_to_find_overlapping_submaps.remove(overlap_callback_id);
   kill_switch = true;
   join();
 }
@@ -89,6 +92,11 @@ void AsyncGlobalMapping::save(const std::string& path) {
 bool AsyncGlobalMapping::replay_submaps() {
   std::lock_guard<std::mutex> lock(global_mapping_mutex);
   return global_mapping->replay_submaps();
+}
+
+bool AsyncGlobalMapping::load(const std::string& path) {
+  std::lock_guard<std::mutex> lock(global_mapping_mutex);
+  return global_mapping->load(path);
 }
 
 gtsam_points::PointCloud::Ptr AsyncGlobalMapping::export_points() {

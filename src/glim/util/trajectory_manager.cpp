@@ -27,6 +27,9 @@ void TrajectoryManager::add_odom(double stamp, const Eigen::Isometry3d& T_odom_s
 
 void TrajectoryManager::update_anchor(double stamp, const Eigen::Isometry3d& T_world_sensor) {
   const auto found = std::lower_bound(odom_stamps.begin(), odom_stamps.end(), stamp);
+  // Offline maps have no live odometry, and a mapping callback can also arrive
+  // ahead of the latest odometry sample. Neither case has an upper bracket.
+  if (found == odom_stamps.end()) return;
   const int idx = std::distance(odom_stamps.begin(), found);
 
   if (std::abs(stamp - odom_stamps[idx]) < 1e-6 || idx == 0) {

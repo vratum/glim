@@ -26,6 +26,7 @@
 #include <gtsam_points/factors/integrated_matching_cost_factor.hpp>
 #include <gtsam_points/factors/integrated_vgicp_factor_gpu.hpp>
 #include <gtsam_points/optimizers/isam2_result_ext.hpp>
+#include <gtsam_points/optimizers/isam2_ext.hpp>
 
 #include <glk/thin_lines.hpp>
 #include <glk/pointcloud_buffer.hpp>
@@ -36,7 +37,9 @@
 namespace glim {
 using gtsam::symbol_shorthand::X;
 
-InteractiveViewer::InteractiveViewer() : logger(create_module_logger("viewer")) {
+InteractiveViewer::InteractiveViewer() : InteractiveViewer(true) {}
+
+InteractiveViewer::InteractiveViewer(bool start_thread) : logger(create_module_logger("viewer")) {
   glim::Config config(glim::GlobalConfig::get_config_path("config_viewer"));
 
   kill_switch = false;
@@ -82,19 +85,42 @@ InteractiveViewer::InteractiveViewer() : logger(create_module_logger("viewer")) 
   using std::placeholders::_2;
   using std::placeholders::_3;
 
-  OdometryEstimationCallbacks::on_new_frame.add(std::bind(&InteractiveViewer::odometry_on_new_frame, this, _1));
-  GlobalMappingCallbacks::on_insert_submap.add(std::bind(&InteractiveViewer::globalmap_on_insert_submap, this, _1));
-  GlobalMappingCallbacks::on_update_submaps.add(std::bind(&InteractiveViewer::globalmap_on_update_submaps, this, _1));
-  GlobalMappingCallbacks::on_smoother_update.add(std::bind(&InteractiveViewer::globalmap_on_smoother_update, this, _1, _2, _3));
-  GlobalMappingCallbacks::on_smoother_update_result.add(std::bind(&InteractiveViewer::globalmap_on_smoother_update_result, this, _1, _2));
+  callback_ids[0] = OdometryEstimationCallbacks::on_new_frame.add(std::bind(&InteractiveViewer::odometry_on_new_frame, this, _1));
+  callback_ids[1] = GlobalMappingCallbacks::on_insert_submap.add(std::bind(&InteractiveViewer::globalmap_on_insert_submap, this, _1));
+  callback_ids[2] = GlobalMappingCallbacks::on_update_submaps.add(std::bind(&InteractiveViewer::globalmap_on_update_submaps, this, _1));
+  callback_ids[3] = GlobalMappingCallbacks::on_smoother_update.add(std::bind(&InteractiveViewer::globalmap_on_smoother_update, this, _1, _2, _3));
+  callback_ids[4] = GlobalMappingCallbacks::on_smoother_update_result.add(std::bind(&InteractiveViewer::globalmap_on_smoother_update_result, this, _1, _2));
 
-  thread = std::thread([this] { viewer_loop(); });
+  if (start_thread) start();
 }
 
 InteractiveViewer::~InteractiveViewer() {
   kill_switch = true;
   if (thread.joinable()) {
     thread.join();
+  }
+  OdometryEstimationCallbacks::on_new_frame.remove(callback_ids[0]);
+  GlobalMappingCallbacks::on_insert_submap.remove(callback_ids[1]);
+  GlobalMappingCallbacks::on_update_submaps.remove(callback_ids[2]);
+  GlobalMappingCallbacks::on_smoother_update.remove(callback_ids[3]);
+  GlobalMappingCallbacks::on_smoother_update_result.remove(callback_ids[4]);
+}
+
+void InteractiveViewer::start() {
+  thread = std::thread([this] { viewer_loop(); });
+}
+
+void InteractiveViewer::process_pending_tasks() {
+  std::vector<std::function<void()>> tasks;
+  {
+    std::lock_guard<std::mutex> lock(invoke_queue_mutex);
+    tasks.swap(invoke_queue);
+  }
+  // Producers must remain free to enqueue while the GUI applies a batch.
+  for (const auto& task : tasks) task();
+  if (submaps_dirty) {
+    submaps_dirty = false;
+    on_submaps_changed();
   }
 }
 
@@ -166,11 +192,11 @@ void InteractiveViewer::viewer_loop() {
       request_to_terminate = true;
     }
 
-    std::lock_guard<std::mutex> lock(invoke_queue_mutex);
-    for (const auto& task : invoke_queue) {
-      task();
+    process_pending_tasks();
+    if (viewer_dirty) {
+      update_viewer();
+      viewer_dirty = false;
     }
-    invoke_queue.clear();
   }
 
   manual_loop_close_modal.reset();
@@ -194,6 +220,7 @@ void InteractiveViewer::invoke(const std::function<void()>& task) {
  */
 void InteractiveViewer::drawable_selection() {
   if (!ImGui::Begin("Selection", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::End();
     return;
   }
 
@@ -497,14 +524,14 @@ void InteractiveViewer::update_viewer() {
     gtsam::Symbol symbol(key);
     switch (symbol.chr()) {
       case 'x':
-        return submaps[symbol.index()]->T_world_origin.translation();
+        return submap_poses.at(symbol.index()).translation();
       case 'e': {
         const int right = symbol.index() % 2;
         const int submap_id = (symbol.index() - right) / 2;
 
         const auto& submap = submaps[submap_id];
         const auto& T_origin_endpoint = right ? submap->T_origin_endpoint_R : submap->T_origin_endpoint_L;
-        const Eigen::Isometry3d T_world_endpoint = submap->T_world_origin * T_origin_endpoint;
+        const Eigen::Isometry3d T_world_endpoint = submap_poses.at(submap_id) * T_origin_endpoint;
 
         return T_world_endpoint.translation();
       }
@@ -539,8 +566,9 @@ void InteractiveViewer::update_viewer() {
   viewer->update_drawable("factors", std::make_shared<glk::ThinLines>(factor_lines, factor_colors), guik::VertexColor().set_alpha(factors_alpha));
 
   std::vector<Eigen::Vector3f> traj;
-  for (const auto& submap : submaps) {
-    const Eigen::Isometry3d T_world_endpoint_L = submap->T_world_origin * submap->T_origin_endpoint_L;
+  for (std::size_t i = 0; i < submaps.size(); ++i) {
+    const auto& submap = submaps[i];
+    const Eigen::Isometry3d T_world_endpoint_L = submap_poses[i] * submap->T_origin_endpoint_L;
     const Eigen::Isometry3d T_odom_imu0 = submap->frames.front()->T_world_imu;
     for (const auto& frame : submap->frames) {
       const Eigen::Isometry3d T_world_imu = T_world_endpoint_L * T_odom_imu0.inverse() * frame->T_world_imu;
@@ -574,12 +602,12 @@ void InteractiveViewer::globalmap_on_insert_submap(const SubMap::ConstPtr& subma
       needs_session_merge = true;
     }
 
-    trajectory->update_anchor(submap->frames[submap->frames.size() / 2]->stamp, submap->T_world_origin);
+    trajectory->update_anchor(submap->frames[submap->frames.size() / 2]->stamp, *pose);
 
     submap_poses.push_back(*pose);
     submaps.push_back(submap);
-    on_submaps_changed();
-    update_viewer();
+    submaps_dirty = true;
+    viewer_dirty = true;
   });
 }
 
@@ -591,11 +619,15 @@ void InteractiveViewer::globalmap_on_update_submaps(const std::vector<SubMap::Pt
   std::transform(updated_submaps.begin(), updated_submaps.end(), poses.begin(), [](const SubMap::ConstPtr& submap) { return submap->T_world_origin; });
 
   invoke([this, poses] {
+    bool changed = false;
     for (int i = 0; i < std::min(submaps.size(), poses.size()); i++) {
-      submap_poses[i] = poses[i];
+      if ((submap_poses[i].matrix().array() != poses[i].matrix().array()).any()) {
+        submap_poses[i] = poses[i];
+        changed = true;
+      }
     }
-    on_submaps_changed();
-    update_viewer();
+    submaps_dirty |= changed;
+    viewer_dirty |= changed;
   });
 }
 
@@ -629,8 +661,8 @@ void InteractiveViewer::globalmap_on_smoother_update(gtsam_points::ISAM2Ext& isa
     }
 
     const gtsam::Pose3 T_target_source = between->measured();
-    const gtsam::Pose3 T_worldt_target(submaps[gtsam::Symbol(target).index()]->T_world_origin.matrix());
-    const gtsam::Pose3 T_worlds_source(submaps[gtsam::Symbol(source).index()]->T_world_origin.matrix());
+    const gtsam::Pose3 T_worldt_target = isam2.calculateEstimate<gtsam::Pose3>(target);
+    const gtsam::Pose3 T_worlds_source = new_values.at<gtsam::Pose3>(source);
     const gtsam::Pose3 T_worldt_worlds = T_worldt_target * T_target_source * T_worlds_source.inverse();
 
     int moved_count = 0;
@@ -668,7 +700,10 @@ void InteractiveViewer::globalmap_on_smoother_update(gtsam_points::ISAM2Ext& isa
     }
   }
 
-  invoke([this, inserted_factors] { global_factors.insert(global_factors.end(), inserted_factors.begin(), inserted_factors.end()); });
+  if (!inserted_factors.empty()) invoke([this, inserted_factors] {
+    global_factors.insert(global_factors.end(), inserted_factors.begin(), inserted_factors.end());
+    viewer_dirty = true;
+  });
 }
 
 /**
@@ -707,6 +742,11 @@ void InteractiveViewer::clear() {
   submap_poses.clear();
   global_factors.clear();
   new_factors.clear();
+  trajectory.reset(new TrajectoryManager);
+  cont_optimize = false;
+  needs_session_merge = false;
+  viewer_dirty = false;
+  submaps_dirty = false;
 
   guik::LightViewer::instance()->clear_drawables();
 }

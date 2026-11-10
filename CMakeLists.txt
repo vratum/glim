@@ -138,6 +138,11 @@ if(BUILD_TESTING)
   target_link_libraries(test_georeference glim)
   target_compile_options(test_georeference PRIVATE -UNDEBUG)
   add_test(NAME georeference COMMAND test_georeference)
+  add_executable(test_async_mapping test/test_async_mapping.cpp)
+  target_link_libraries(test_async_mapping glim)
+  target_compile_options(test_async_mapping PRIVATE -UNDEBUG)
+  add_test(NAME async_mapping COMMAND test_async_mapping ${CMAKE_CURRENT_SOURCE_DIR}/config)
+  set_tests_properties(async_mapping PROPERTIES TIMEOUT 15)
 endif()
 
 # Create shared libraries for estimation modules
@@ -192,6 +197,13 @@ if(BUILD_WITH_VIEWER)
   target_link_libraries(interactive_viewer
     glim
   )
+  if(BUILD_TESTING)
+    add_executable(test_viewer_tasks test/test_viewer_tasks.cpp)
+    target_link_libraries(test_viewer_tasks interactive_viewer)
+    target_compile_options(test_viewer_tasks PRIVATE -UNDEBUG)
+    add_test(NAME viewer_tasks COMMAND test_viewer_tasks ${CMAKE_CURRENT_SOURCE_DIR}/config)
+    set_tests_properties(viewer_tasks PROPERTIES TIMEOUT 15)
+  endif()
 
   # Map editor
   add_library(map_editor SHARED
