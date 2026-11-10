@@ -19,6 +19,7 @@ private:
   enum class PickMode { NONE, ADD, MOVE, INSPECT };
   void pick();
   void draw_editor();
+  void draw_info();
   void edit(const GeographicControlPoint& point, int index);
   void changed();
   void persist();

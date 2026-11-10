@@ -90,7 +90,7 @@ void GeoreferencePanel::persist() {
   if (map_path.empty() || !load_error.empty()) return;
   try {
     model.save(map_path / "georeference.json");
-    message = "Coordinates saved. Map optimization/merging also requires File > Save > Save Map.";
+    message = "Coordinates saved.";
   } catch (const std::exception& error) { message = std::string("Could not save coordinates: ") + error.what(); }
 }
 
@@ -252,13 +252,43 @@ void GeoreferencePanel::draw_markers() {
   }
 }
 
+void GeoreferencePanel::draw_info() {
+  if (ImGui::SmallButton("(i)##georeference_info")) ImGui::OpenPopup("Georeferencing details");
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Georeferencing details");
+  ImGui::SetNextWindowSize(ImVec2(500,0), ImGuiCond_Appearing);
+  if (!ImGui::BeginPopup("Georeferencing details")) return;
+  ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x);
+  ImGui::TextUnformatted("Georeferencing details");
+  ImGui::Separator();
+  ImGui::TextWrapped("Add controls on recognisable map features. Calculate alignment to check how well they agree.");
+  if (current) {
+    const auto& s = *model.solution;
+    ImGui::TextColored(good, "Alignment available: RMSE %.1f m, max %.1f m", s.rmse_m, s.max_error_m);
+    ImGui::Text("Control spread %.1f m", s.baseline_m);
+    if (s.weak_geometry) ImGui::TextColored(warning, "Weak geometry: add more controls farther apart (4-6 recommended).");
+    if (std::count_if(model.points.begin(),model.points.end(),[](const auto& p) { return p.enabled; }) < 4) {
+      ImGui::TextColored(warning,"Use at least 4 well-spread controls for reliable individual checks.");
+    } else if (std::any_of(control_diagnostics.begin(),control_diagnostics.end(),[](const auto& d) { return !d.independent_check; })) {
+      ImGui::TextColored(warning,"Some controls lack reliable support from the others.");
+    }
+  } else ImGui::TextColored(warning, "Alignment unavailable / needs calculation.");
+  ImGui::Separator();
+  ImGui::TextWrapped("Errors are agreement with your controls, not proven GNSS accuracy. A common coordinate offset cannot be detected.");
+  ImGui::TextColored(bad,"Red: inconsistent control");
+  ImGui::TextColored(good,"Green ghost: suggested location");
+  ImGui::TextWrapped("Suggestions use the other controls. Check both the map position and WGS84; controls are never moved automatically.");
+  ImGui::TextWrapped("Inspect WGS84 shows the calculated latitude and longitude of a map point.");
+  ImGui::TextWrapped("Coordinates are saved automatically. After map optimization or merging, recalculate and use File > Save > Save Map.");
+  ImGui::PopTextWrapPos();
+  ImGui::EndPopup();
+}
+
 void GeoreferencePanel::draw() {
   if (map_path.empty()) return;
   pick();
   draw_markers();
-  ImGui::SetNextWindowSize(ImVec2(620,510), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(620,340), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("Georeferencing - WGS84")) {
-    ImGui::TextWrapped("Add controls on recognisable map features. Calculate alignment to check how well they agree.");
     if (!load_error.empty()) ImGui::TextColored(warning, "Could not load georeference.json: %s", load_error.c_str());
     ImGui::BeginDisabled(!load_error.empty() || geometry.empty());
     if (ImGui::Button("Add coordinate", ImVec2(150,32))) pick_mode = PickMode::ADD;
@@ -321,33 +351,20 @@ void GeoreferencePanel::draw() {
     if (ImGui::Button("Inspect WGS84", ImVec2(130,30))) pick_mode = PickMode::INSPECT;
     ImGui::EndDisabled();
     ImGui::EndDisabled();
-    if (current) {
-      const auto& s = *model.solution;
-      ImGui::TextColored(good, "Alignment available: RMSE %.1f m, max %.1f m", s.rmse_m, s.max_error_m);
-      ImGui::Text("Control spread %.1f m", s.baseline_m);
-      if (s.weak_geometry) ImGui::TextColored(warning, "Weak geometry: add more controls farther apart (4-6 recommended).");
-      ImGui::TextWrapped("Errors are agreement with your controls, not proven GNSS accuracy. A common coordinate offset cannot be detected.");
-      ImGui::TextColored(bad,"Red: inconsistent control");
-      ImGui::SameLine(); ImGui::TextColored(good,"Green ghost: suggested location");
-      ImGui::TextWrapped("Suggestions use the other controls. Check both the map position and WGS84; controls are never moved automatically.");
-      if (std::count_if(model.points.begin(),model.points.end(),[](const auto& p) { return p.enabled; }) < 4) {
-        ImGui::TextColored(warning,"Use at least 4 well-spread controls for reliable individual checks.");
-      } else if (std::any_of(control_diagnostics.begin(),control_diagnostics.end(),[](const auto& d) { return !d.independent_check; })) {
-        ImGui::TextColored(warning,"Some controls lack reliable support from the others.");
+    ImGui::SameLine();
+    draw_info();
+    if (current && selected >= 0) {
+      const auto check = diagnostic(model.points.at(selected).id);
+      if (check && check->suspect && check->suggested_wgs84) {
+        ImGui::Text("Selected control disagrees with others by %.1f m.",check->deviation_m);
+        double latitude = check->suggested_wgs84->latitude, longitude = check->suggested_wgs84->longitude;
+        ImGui::TextDisabled("Suggested WGS84 at the current map point:");
+        ImGui::SetNextItemWidth(210);
+        ImGui::InputDouble("Suggested latitude",&latitude,0,0,"%.8f",ImGuiInputTextFlags_ReadOnly);
+        ImGui::SetNextItemWidth(210);
+        ImGui::InputDouble("Suggested longitude",&longitude,0,0,"%.8f",ImGuiInputTextFlags_ReadOnly);
       }
-      if (selected >= 0) {
-        const auto check = diagnostic(model.points.at(selected).id);
-        if (check && check->suspect && check->suggested_wgs84) {
-          ImGui::Text("Selected control disagrees with others by %.1f m.",check->deviation_m);
-          double latitude = check->suggested_wgs84->latitude, longitude = check->suggested_wgs84->longitude;
-          ImGui::TextDisabled("Suggested WGS84 at the current map point:");
-          ImGui::SetNextItemWidth(210);
-          ImGui::InputDouble("Suggested latitude",&latitude,0,0,"%.8f",ImGuiInputTextFlags_ReadOnly);
-          ImGui::SetNextItemWidth(210);
-          ImGui::InputDouble("Suggested longitude",&longitude,0,0,"%.8f",ImGuiInputTextFlags_ReadOnly);
-        }
-      }
-    } else ImGui::TextColored(warning, "Alignment unavailable / needs calculation.");
+    }
     if (inspected) ImGui::Text("Selected point: latitude %.8f, longitude %.8f", inspected->latitude, inspected->longitude);
     if (!message.empty()) ImGui::TextWrapped("%s", message.c_str());
   }
