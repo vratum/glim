@@ -49,6 +49,7 @@ public:
   double randomsampling_rate;
   double max_implicit_loop_distance;
   double min_implicit_loop_overlap;
+  int max_implicit_loop_neighbors;  // 0 preserves the unrestricted upstream policy.
 
   bool use_isam2_dogleg;
   double isam2_relinearize_skip;

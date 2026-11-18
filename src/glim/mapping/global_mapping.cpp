@@ -1,6 +1,9 @@
 #include <glim/mapping/global_mapping.hpp>
+#include <glim/mapping/implicit_neighbors.hpp>
 
 #include <map>
+#include <cmath>
+#include <stdexcept>
 #include <unordered_set>
 #include <set>
 #include <spdlog/spdlog.h>
@@ -70,6 +73,9 @@ GlobalMappingParams::GlobalMappingParams() {
   randomsampling_rate = config.param<double>("global_mapping", "randomsampling_rate", 1.0);
   max_implicit_loop_distance = config.param<double>("global_mapping", "max_implicit_loop_distance", 100.0);
   min_implicit_loop_overlap = config.param<double>("global_mapping", "min_implicit_loop_overlap", 0.1);
+  max_implicit_loop_neighbors = config.param<int>("global_mapping", "max_implicit_loop_neighbors", 0);
+  if (max_implicit_loop_neighbors != 0 && max_implicit_loop_neighbors < 3)
+    throw std::invalid_argument("max_implicit_loop_neighbors must be 0 or at least 3");
 
   enable_gpu = registration_error_factor_type.find("GPU") != std::string::npos;
 
@@ -505,6 +511,7 @@ std::shared_ptr<gtsam::NonlinearFactorGraph> GlobalMapping::create_matching_cost
 
   double previous_overlap = 0.0;
   double squared_max_implicit_loop_distance = params.max_implicit_loop_distance * params.max_implicit_loop_distance;
+  std::vector<ImplicitNeighbor> candidates;
 
   for (int i = 0; i < current; i++) {
     // Only explicitly verified geometry may bridge physical recording sessions.
@@ -518,10 +525,15 @@ std::shared_ptr<gtsam::NonlinearFactorGraph> GlobalMapping::create_matching_cost
     const double overlap = gtsam_points::overlap_auto(submaps[i]->voxelmaps.back(), current_submap->frame, delta);
 
     previous_overlap = i == current - 1 ? overlap : previous_overlap;
-    if (overlap < params.min_implicit_loop_overlap) {
+    if (!std::isfinite(overlap) || overlap < params.min_implicit_loop_overlap) {
       continue;
     }
+    candidates.push_back({i, overlap, submaps[i]->origin_frame()->stamp});
+  }
 
+  for (const int i : select_implicit_neighbors(std::move(candidates), current - 1,
+                                              current_submap->origin_frame()->stamp,
+                                              params.max_implicit_loop_neighbors)) {
     if (params.registration_error_factor_type == "VGICP") {
       for (const auto& voxelmap : submaps[i]->voxelmaps) {
         factors->emplace_shared<gtsam_points::IntegratedVGICPFactor>(X(i), X(current), voxelmap, subsampled_submaps[current]);
