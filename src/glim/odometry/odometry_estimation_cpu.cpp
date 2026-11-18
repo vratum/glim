@@ -205,8 +205,13 @@ void OdometryEstimationCPU::update_target(const int current, const Eigen::Isomet
       target_voxelmap->insert(*transformed);
     }
   }
+}
 
-  // Update target point cloud (just for visualization).
+void OdometryEstimationCPU::update_frames(int current, const gtsam::NonlinearFactorGraph& new_factors) {
+  OdometryEstimationIMU::update_frames(current, new_factors);
+
+  const auto params = static_cast<const OdometryEstimationCPUParams*>(this->params.get());
+  // Update target point cloud (just for visualization), after state fusion.
   // This is not necessary for mapping and can safely be removed.
   if (frames.size() % 50 == 0) {
     EstimationFrame::Ptr frame(new EstimationFrame);
@@ -214,8 +219,10 @@ void OdometryEstimationCPU::update_target(const int current, const Eigen::Isomet
     frame->stamp = frames.back()->stamp;
 
     frame->T_lidar_imu = frames.back()->T_lidar_imu;
-    frame->T_world_lidar = frame->T_lidar_imu.inverse();
-    frame->T_world_imu.setIdentity();
+    // Registration integrates clouds in its own target frame. IMU/height
+    // fusion can move the odometry frame relative to it; identity would draw
+    // a second, drifting copy of the local surface above/below the vehicle.
+    frame->set_T_world_sensor(FrameID::IMU, frames[current]->T_world_imu * last_T_target_imu.inverse());
 
     frame->v_world_imu.setZero();
     frame->imu_bias.setZero();

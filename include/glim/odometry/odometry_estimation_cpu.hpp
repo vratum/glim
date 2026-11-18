@@ -54,6 +54,7 @@ private:
   virtual gtsam::NonlinearFactorGraph create_factors(const int current, const gtsam_points::shared_ptr<gtsam::ImuFactor>& imu_factor, gtsam::Values& new_values) override;
 
   virtual void fallback_smoother() override;
+  virtual void update_frames(int current, const gtsam::NonlinearFactorGraph& new_factors) override;
 
   void update_target(const int current, const Eigen::Isometry3d& T_target_imu);
 
