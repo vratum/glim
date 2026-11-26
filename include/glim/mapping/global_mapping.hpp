@@ -71,6 +71,7 @@ public:
 
   virtual void find_overlapping_submaps(double min_overlap) override;
   virtual void optimize() override;
+  VerticalEraseResult erase_vertical_cylinder(const Eigen::Vector2d& center_xy, double radius_m) override;
 
   virtual void save(const std::string& path) override;
   virtual gtsam_points::PointCloud::Ptr export_points() override;
@@ -91,6 +92,7 @@ private:
   std::shared_ptr<gtsam::NonlinearFactorGraph> create_matching_cost_factors(int current) const;
 
   void update_submaps();
+  void rebuild_submap_registration_data(std::size_t index);
   gtsam_points::ISAM2ResultExt update_isam2(const gtsam::NonlinearFactorGraph& new_factors, const gtsam::Values& new_values);
 
   void recover_graph() override;
@@ -118,6 +120,7 @@ private:
 
   std::unique_ptr<gtsam::Values> new_values;
   std::unique_ptr<gtsam::NonlinearFactorGraph> new_factors;
+  bool map_geometry_edited = false;
 
   std::unique_ptr<gtsam_points::ISAM2Ext> isam2;
 

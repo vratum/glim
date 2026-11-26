@@ -79,6 +79,7 @@ public:
   bool load(const std::string& path);
 
   gtsam_points::PointCloud::Ptr export_points();
+  VerticalEraseResult erase_vertical_cylinder(const Eigen::Vector2d& center_xy, double radius_m);
 
   std::shared_ptr<glim::GlobalMappingBase> get_global_mapping() {
     std::lock_guard<std::mutex> lock(global_mapping_mutex);

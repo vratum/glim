@@ -354,6 +354,71 @@ void GlobalMapping::insert_submap(int current, const SubMap::Ptr& submap) {
   subsampled_submaps.push_back(subsampled_submap);
 }
 
+void GlobalMapping::rebuild_submap_registration_data(const std::size_t index) {
+  const auto& submap = submaps.at(index);
+  submap->voxelmaps.clear();
+
+  if (!submap->frame || !submap->frame->has_points()) {
+    subsampled_submaps.at(index) = submap->frame;
+    return;
+  }
+
+  const int max_scan_count = 256;
+  const double dist_median = gtsam_points::median_distance(submap->frame, max_scan_count);
+  const double p =
+    std::max(0.0, std::min(1.0, (dist_median - params.submap_voxel_resolution_dmin) / (params.submap_voxel_resolution_dmax - params.submap_voxel_resolution_dmin)));
+  const double base_resolution = params.submap_voxel_resolution + p * (params.submap_voxel_resolution_max - params.submap_voxel_resolution);
+
+  gtsam_points::PointCloud::ConstPtr subsampled_submap;
+  if (params.randomsampling_rate > 0.99) {
+    subsampled_submap = submap->frame;
+  } else {
+    subsampled_submap = gtsam_points::random_sampling(submap->frame, params.randomsampling_rate, mt);
+  }
+
+#ifdef GTSAM_POINTS_USE_CUDA
+  if (params.enable_gpu) {
+    subsampled_submap = gtsam_points::PointCloudGPU::clone(*subsampled_submap);
+    for (int level = 0; level < params.submap_voxelmap_levels; ++level) {
+      const double resolution = base_resolution * std::pow(params.submap_voxelmap_scaling_factor, level);
+      auto voxelmap = std::make_shared<gtsam_points::GaussianVoxelMapGPU>(resolution);
+      voxelmap->insert(*subsampled_submap);
+      submap->voxelmaps.push_back(voxelmap);
+    }
+  }
+#endif
+
+  if (submap->voxelmaps.empty()) {
+    for (int level = 0; level < params.submap_voxelmap_levels; ++level) {
+      const double resolution = base_resolution * std::pow(params.submap_voxelmap_scaling_factor, level);
+      auto voxelmap = std::make_shared<gtsam_points::GaussianVoxelMapCPU>(resolution);
+      voxelmap->insert(*subsampled_submap);
+      submap->voxelmaps.push_back(voxelmap);
+    }
+  }
+
+  subsampled_submaps.at(index) = subsampled_submap;
+}
+
+VerticalEraseResult GlobalMapping::erase_vertical_cylinder(
+  const Eigen::Vector2d& center_xy,
+  const double radius_m) {
+  const auto result = glim::erase_vertical_cylinder(submaps, center_xy, radius_m);
+  for (const int submap_id : result.changed_submap_ids) {
+    const auto found = std::find_if(submaps.begin(), submaps.end(), [submap_id](const auto& submap) {
+      return submap->id == submap_id;
+    });
+    if (found != submaps.end()) {
+      rebuild_submap_registration_data(std::distance(submaps.begin(), found));
+    }
+  }
+  if (result.erased_points && params.emit_callbacks) {
+    Callbacks::on_update_submaps(submaps);
+  }
+  map_geometry_edited |= result.erased_points != 0;
+  return result;
+}
+
 void GlobalMapping::find_overlapping_submaps(double min_overlap) {
   if (submaps.empty()) {
     return;
@@ -631,7 +696,15 @@ void GlobalMapping::save(const std::string& path) {
     save_pending_session(path);
     return;
   }
-  optimize();
+  if (map_geometry_edited) {
+    // Existing matching factors reference the geometry that was loaded before
+    // manual editing. The dump stores only their topology and recreates them
+    // from the edited clouds on the next load, so do not optimize once more
+    // against stale geometry before writing this map.
+    logger->info("skip optimization before saving manually edited map geometry");
+  } else {
+    optimize();
+  }
 
   boost::filesystem::create_directories(path);
 

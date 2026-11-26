@@ -107,6 +107,13 @@ gtsam_points::PointCloud::Ptr AsyncGlobalMapping::export_points() {
   return points;
 }
 
+VerticalEraseResult AsyncGlobalMapping::erase_vertical_cylinder(
+  const Eigen::Vector2d& center_xy,
+  const double radius_m) {
+  std::lock_guard<std::mutex> lock(global_mapping_mutex);
+  return global_mapping->erase_vertical_cylinder(center_xy, radius_m);
+}
+
 void AsyncGlobalMapping::run(int online_iterations, int online_interval_ms) {
   using Clock = std::chrono::steady_clock;
   auto last_optimization_time = Clock::now();

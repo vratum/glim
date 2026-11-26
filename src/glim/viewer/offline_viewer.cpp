@@ -1,6 +1,11 @@
 #include <glim/viewer/offline_viewer.hpp>
 #include <glim/viewer/interactive/georeference_panel.hpp>
 
+#include <algorithm>
+#include <cmath>
+#include <optional>
+#include <vector>
+
 #include <boost/filesystem.hpp>
 #include <gtsam_points/config.hpp>
 #include <gtsam_points/optimizers/linearization_hook.hpp>
@@ -10,6 +15,7 @@
 #include <spdlog/spdlog.h>
 #include <portable-file-dialogs.h>
 #include <glk/io/ply_io.hpp>
+#include <glk/thin_lines.hpp>
 #include <guik/recent_files.hpp>
 #include <guik/progress_modal.hpp>
 #include <guik/viewer/light_viewer.hpp>
@@ -44,6 +50,7 @@ void OfflineViewer::setup_ui() {
     }
     georeference_panel->draw();
   });
+  viewer->register_ui_callback("vertical_eraser", [this] { draw_vertical_eraser(); });
 
   progress_modal.reset(new guik::ProgressModal("offline_viewer_progress"));
 
@@ -195,6 +202,11 @@ void OfflineViewer::main_menu() {
   }
   auto export_result = progress_modal->run<bool>("export");
 
+  const auto erase_result = progress_modal->run<VerticalEraseResult>("vertical_erase");
+  if (erase_result) {
+    finish_vertical_erase(*erase_result);
+  }
+
   if (async_global_mapping && !export_map_path.empty()) {
     logger->info("Exporting map to {}", export_map_path);
     const std::string path = export_map_path;
@@ -218,10 +230,168 @@ void OfflineViewer::main_menu() {
       async_global_mapping.reset();
       georeference_panel->clear();
       clear();
+      vertical_eraser_active = false;
+      vertical_eraser_has_footprint = false;
     } else {
       logger->warn("No map to close");
     }
   }
+}
+
+void OfflineViewer::draw_vertical_eraser() {
+  auto viewer = guik::LightViewer::instance();
+  const bool map_loaded = static_cast<bool>(async_global_mapping);
+
+  if (ImGui::Begin("Map eraser - vertical", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextUnformatted("Remove map points in a vertical column.");
+    ImGui::TextUnformatted("Use top view and click anywhere to erase an area at every height.");
+    ImGui::BeginDisabled(!map_loaded || progress_modal->is_running());
+    ImGui::SetNextItemWidth(180.0f);
+    ImGui::DragFloat("Radius (m)", &vertical_eraser_radius_m, 0.1f, 0.05f, 1000.0f, "%.2f");
+    if (!vertical_eraser_active) {
+      if (ImGui::Button("Erase on map", ImVec2(150.0f, 30.0f))) {
+        vertical_eraser_active = true;
+        vertical_eraser_message = "Left-click anywhere in the map view to place the eraser.";
+      }
+    } else {
+      if (ImGui::Button("Stop erasing", ImVec2(150.0f, 30.0f))) {
+        vertical_eraser_active = false;
+      }
+      ImGui::SameLine();
+      ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f), "Click anywhere in the map view.");
+    }
+    ImGui::EndDisabled();
+    if (!map_loaded) {
+      ImGui::TextDisabled("Open a map to use the eraser.");
+    }
+    ImGui::TextDisabled("Save the map after editing.");
+    if (!vertical_eraser_message.empty()) {
+      ImGui::TextWrapped("%s", vertical_eraser_message.c_str());
+    }
+  }
+  ImGui::End();
+
+  if (vertical_eraser_active && map_loaded && !progress_modal->is_running()) {
+    const auto& io = ImGui::GetIO();
+    if (!io.WantCaptureMouse && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+      const Eigen::Vector2i pixel(static_cast<int>(io.MousePos.x), static_cast<int>(io.MousePos.y));
+      const auto info = viewer->pick_info(pixel, 0);
+      const float depth = viewer->pick_depth(pixel, 0);
+      if (info[0] == static_cast<int>(PickType::POINTS) && std::isfinite(depth) && depth > 0.0f && depth < 1.0f) {
+        vertical_eraser_center = viewer->unproject(pixel, depth).cast<double>();
+      } else {
+        const auto center = vertical_eraser_center_from_pixel(pixel, vertical_eraser_plane_z());
+        if (!center) {
+          vertical_eraser_message = "Cannot place the eraser from this camera angle. Switch to top view.";
+          draw_vertical_eraser_footprint();
+          return;
+        }
+        vertical_eraser_center = *center;
+      }
+      vertical_eraser_has_footprint = true;
+      request_vertical_erase(vertical_eraser_center);
+    }
+  }
+
+  draw_vertical_eraser_footprint();
+}
+
+double OfflineViewer::vertical_eraser_plane_z() const {
+  if (vertical_eraser_has_footprint) {
+    return vertical_eraser_center.z();
+  }
+
+  std::vector<double> heights;
+  heights.reserve(submap_poses.size());
+  for (const auto& pose : submap_poses) {
+    if (std::isfinite(pose.translation().z())) {
+      heights.push_back(pose.translation().z());
+    }
+  }
+  if (heights.empty()) {
+    return 0.0;
+  }
+  const auto middle = heights.begin() + heights.size() / 2;
+  std::nth_element(heights.begin(), middle, heights.end());
+  return *middle;
+}
+
+std::optional<Eigen::Vector3d> OfflineViewer::vertical_eraser_center_from_pixel(
+  const Eigen::Vector2i& pixel,
+  const double plane_z) const {
+  auto viewer = guik::LightViewer::instance();
+  const Eigen::Vector3d near_point = viewer->unproject(pixel, 0.001f).cast<double>();
+  const Eigen::Vector3d far_point = viewer->unproject(pixel, 0.999f).cast<double>();
+  const Eigen::Vector3d direction = far_point - near_point;
+  if (!near_point.allFinite() || !direction.allFinite() || std::abs(direction.z()) < 1e-9) {
+    return std::nullopt;
+  }
+
+  const double distance = (plane_z - near_point.z()) / direction.z();
+  const Eigen::Vector3d center = near_point + distance * direction;
+  if (!std::isfinite(distance) || !center.allFinite()) {
+    return std::nullopt;
+  }
+  return center;
+}
+
+void OfflineViewer::request_vertical_erase(const Eigen::Vector3d& center) {
+  const Eigen::Vector2d center_xy = center.head<2>();
+  const double radius_m = vertical_eraser_radius_m;
+  vertical_eraser_message = "Erasing map points...";
+  progress_modal->open<VerticalEraseResult>(
+    "vertical_erase",
+    [this, center_xy, radius_m](guik::ProgressInterface& progress) {
+      progress.set_title("Erase map points");
+      progress.set_text("Removing the vertical column");
+      progress.set_maximum(1);
+      const auto result = async_global_mapping->erase_vertical_cylinder(center_xy, radius_m);
+      progress.increment();
+      return result;
+    });
+}
+
+void OfflineViewer::finish_vertical_erase(const VerticalEraseResult& result) {
+  if (!result.erased_points) {
+    vertical_eraser_message = "No map points were inside this vertical column.";
+    return;
+  }
+
+  auto viewer = guik::LightViewer::instance();
+  for (const int submap_id : result.changed_submap_ids) {
+    viewer->remove_drawable("submap_" + std::to_string(submap_id));
+  }
+  viewer_dirty = true;
+  georeference_geometry_dirty = true;
+  vertical_eraser_message =
+    "Erased " + std::to_string(result.erased_points) + " map points. Use File > Save > Save Map to keep this edit.";
+  logger->info(
+    "vertical eraser removed {} points from {} submaps",
+    result.erased_points,
+    result.changed_submap_ids.size());
+}
+
+void OfflineViewer::draw_vertical_eraser_footprint() {
+  auto viewer = guik::LightViewer::instance();
+  if (!vertical_eraser_has_footprint) {
+    viewer->remove_drawable("vertical_eraser_footprint");
+    return;
+  }
+
+  constexpr int segments = 64;
+  constexpr double pi = 3.14159265358979323846;
+  std::vector<Eigen::Vector3f> circle;
+  circle.reserve(segments);
+  for (int i = 0; i < segments; ++i) {
+    const double angle = 2.0 * pi * static_cast<double>(i) / segments;
+    circle.emplace_back(
+      static_cast<float>(vertical_eraser_center.x() + vertical_eraser_radius_m * std::cos(angle)),
+      static_cast<float>(vertical_eraser_center.y() + vertical_eraser_radius_m * std::sin(angle)),
+      static_cast<float>(vertical_eraser_center.z()));
+  }
+  auto footprint = std::make_shared<glk::ThinLines>(circle, true);
+  footprint->set_line_width(2.0f);
+  viewer->update_drawable("vertical_eraser_footprint", footprint, guik::FlatColor(1.0f, 0.25f, 0.1f, 1.0f));
 }
 
 std::shared_ptr<glim::GlobalMapping> OfflineViewer::load_map(guik::ProgressInterface& progress, const std::string& path, std::shared_ptr<GlobalMapping> global_mapping) {

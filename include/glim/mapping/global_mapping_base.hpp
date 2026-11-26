@@ -7,6 +7,7 @@
 #endif
 
 #include <glim/mapping/sub_map.hpp>
+#include <glim/mapping/map_eraser.hpp>
 #include <gtsam_points/types/point_cloud.hpp>
 
 namespace spdlog {
@@ -61,6 +62,9 @@ public:
    * @brief Request to detect and recover graph corruption
    */
   virtual void recover_graph();
+
+  /// Remove all points inside a vertical cylinder in map coordinates.
+  virtual VerticalEraseResult erase_vertical_cylinder(const Eigen::Vector2d&, double) { return {}; }
 
   /**
    * @brief Save the mapping result

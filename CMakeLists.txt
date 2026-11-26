@@ -97,6 +97,7 @@ add_library(glim SHARED
   src/glim/odometry/odometry_estimation_cpu.cpp
   # mapping
   src/glim/mapping/callbacks.cpp
+  src/glim/mapping/map_eraser.cpp
   src/glim/mapping/sub_map.cpp
   src/glim/mapping/sub_mapping_base.cpp
   src/glim/mapping/global_mapping_base.cpp
@@ -147,6 +148,10 @@ if(BUILD_TESTING)
   target_compile_options(test_async_mapping PRIVATE -UNDEBUG)
   add_test(NAME async_mapping COMMAND test_async_mapping ${CMAKE_CURRENT_SOURCE_DIR}/config)
   set_tests_properties(async_mapping PROPERTIES TIMEOUT 15)
+  add_executable(test_vertical_eraser test/test_vertical_eraser.cpp)
+  target_link_libraries(test_vertical_eraser glim)
+  target_compile_options(test_vertical_eraser PRIVATE -UNDEBUG)
+  add_test(NAME vertical_eraser COMMAND test_vertical_eraser)
 endif()
 
 # Create shared libraries for estimation modules
